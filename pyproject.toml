@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tradeopsy"
+version = "0.0.1"
+description = "A股交割单体检报告：严格学术口径的交易行为归因"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+market = ["akshare>=1.12"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

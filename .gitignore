@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.idea/
+.vscode/
+.DS_Store
+
+# 绝不进仓库的东西：真实交割单与个人交易数据
+*.交割单
+data/private/
+!fixtures/README.md
+outputs/
+reports/*.html
