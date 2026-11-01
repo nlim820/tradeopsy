@@ -10,10 +10,13 @@ from .disposition import (
     compute_disposition,
     open_positions_from_ledger,
 )
+from .significance import SignificanceResult, bootstrap_disposition
 
 __all__ = [
     "DispositionReport",
     "OpenPositionMV",
     "compute_disposition",
     "open_positions_from_ledger",
+    "SignificanceResult",
+    "bootstrap_disposition",
 ]

@@ -32,8 +32,9 @@ from tradeopsy.analytics.disposition import (  # noqa: E402
     compute_disposition,
     open_positions_from_ledger,
 )
+from tradeopsy.analytics.significance import bootstrap_disposition  # noqa: E402
 from tradeopsy.ledger import PositionLedger  # noqa: E402
-from tradeopsy.model import Event, EventType, money  # noqa: E402
+from tradeopsy.model import Event, EventType, RealizedChunk, money  # noqa: E402
 
 D = Decimal
 REPO = Path(__file__).resolve().parents[1]
@@ -101,10 +102,10 @@ def _card(rep, source: str) -> str:
     bar = "=" * 60
     lines = [bar, "  tradeopsy · 交易行为体检卡（处置效应）", bar, f"  数据来源：{source}"]
     if rep.has_full:
-        lines.append(f"\n  PGR 盈利实现比例   {rep.pgr:.2%}")
-        lines.append(f"  PLR 亏损实现比例   {rep.plr:.2%}")
+        lines.append(f"\n  PGR 盈利实现比例（金额口径）   {rep.pgr:.2%}")
+        lines.append(f"  PLR 亏损实现比例（金额口径）   {rep.plr:.2%}")
         de = rep.disposition_effect or 0.0
-        lines.append(f"  处置效应 DE        {de:+.2%}")
+        lines.append(f"  处置效应 DE（金额口径）        {de:+.2%}")
         lines.append(f"\n  → {rep.verdict}")
     else:
         lines.append("\n  PGR/PLR 不可用（缺未平仓市值）：")
@@ -127,12 +128,57 @@ def _card(rep, source: str) -> str:
     return "\n".join(lines)
 
 
+def _large_dataset() -> tuple[list[RealizedChunk], list[OpenPositionMV]]:
+    """教学用大样本：PGR=0.45、PLR=0.80，足以让 bootstrap 检出显著性。
+
+    每笔盈亏金额相同（±100），所以金额口径与计数口径一致，便于对照。
+    """
+    chunks: list[RealizedChunk] = []
+    for i in range(18):
+        chunks.append(RealizedChunk(f"G{i}", date(2026, 1, 5), date(2026, 2, 5),
+                                    D("100"), D("1000"), money(D("1100"))))
+    for i in range(32):
+        chunks.append(RealizedChunk(f"L{i}", date(2026, 1, 5), date(2026, 2, 5),
+                                    D("100"), D("1000"), money(D("900"))))
+    opens = [OpenPositionMV(f"PG{i}", D("1000"), D("1200")) for i in range(22)]
+    opens += [OpenPositionMV(f"PL{i}", D("1000"), D("800")) for i in range(8)]
+    return chunks, opens
+
+
+def _sig_card(sig, label: str = "计数口径 · Odean 原文") -> str:
+    lines = ["", "-" * 60, f"  显著性检验（{label}）"]
+    lines.append(
+        f"  机会分布：盈利 卖出 {sig.n_gain_sold} / 持有 {sig.n_gain_held}"
+        f" · 亏损 割肉 {sig.n_loss_sold} / 持有 {sig.n_loss_held}"
+    )
+    if sig.pgr_count is not None and sig.plr_count is not None:
+        lines.append(
+            f"  计数 PGR {sig.pgr_count:.2%} · PLR {sig.plr_count:.2%}"
+            f" · DE {sig.de_count:+.2%}"
+        )
+    if sig.ci_low is not None and sig.ci_high is not None:
+        z = f" · 双比例 z p={sig.p_value_z:.4f}" if sig.p_value_z is not None else ""
+        lines.append(
+            f"  95% CI [{sig.ci_low:+.2%}, {sig.ci_high:+.2%}]"
+            f" · bootstrap p={sig.p_value_boot:.4f}{z}"
+        )
+    lines.append(f"  → {sig.verdict}")
+    for n in sig.notes:
+        lines.append(f"   · {n}")
+    lines.append("   注：金额口径与计数口径可能不一致，学术判定以计数口径为准。")
+    return "\n".join(lines)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--live", action="store_true", help="强制使用 paper/trades.csv")
+    ap.add_argument("--large", action="store_true", help="用大样本教学数据集演示显著性")
     args = ap.parse_args()
 
-    if args.live or TRADES_CSV.exists():
+    if args.large:
+        chunks, opens = _large_dataset()
+        source = "内置合成场景·大样本（教学用，非真实数据）"
+    elif args.live or TRADES_CSV.exists():
         if not TRADES_CSV.exists():
             print(f"没有 {TRADES_CSV}，无法用 --live。", file=sys.stderr)
             return 1
@@ -142,15 +188,19 @@ def main() -> int:
         ledger.apply_all(events)
         prices = _last_prices({op.symbol for op in ledger.open_positions()})
         opens = open_positions_from_ledger(ledger, prices or None)
+        chunks = ledger.chunks
     else:
         events = _synthetic_events()
         source = "内置合成场景（离线演示，非真实数据）"
         ledger = PositionLedger()
         ledger.apply_all(events)
         opens = open_positions_from_ledger(ledger, _synthetic_prices())
+        chunks = ledger.chunks
 
-    rep = compute_disposition(ledger.chunks, opens)
+    rep = compute_disposition(chunks, opens)
+    sig = bootstrap_disposition(chunks, opens)
     print(_card(rep, source))
+    print(_sig_card(sig))
     return 0
 
 

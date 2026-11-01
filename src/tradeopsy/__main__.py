@@ -23,6 +23,7 @@ from .analytics.disposition import (
     compute_disposition,
     open_positions_from_ledger,
 )
+from .analytics.significance import SignificanceResult, bootstrap_disposition
 from .ledger import PositionLedger, summarize, timeline
 from .model import EventType
 from .parsers import parse_file
@@ -151,6 +152,30 @@ def _render_disposition(rep: DispositionReport) -> list[str]:
     for n in rep.notes:
         lines.append(f"   · {n}")
     return lines
+
+
+def _render_significance(sig: SignificanceResult) -> str:
+    """显著性检验板块（计数口径）。"""
+    lines = ["", "【显著性检验 · 计数口径 Odean】"]
+    lines.append(
+        f"  机会：盈利 卖出 {sig.n_gain_sold}/持有 {sig.n_gain_held}"
+        f" · 亏损 割肉 {sig.n_loss_sold}/持有 {sig.n_loss_held}"
+    )
+    if sig.pgr_count is not None and sig.plr_count is not None:
+        lines.append(
+            f"  计数 PGR {sig.pgr_count:.2%} · PLR {sig.plr_count:.2%}"
+            f" · DE {sig.de_count:+.2%}"
+        )
+    if sig.ci_low is not None and sig.ci_high is not None:
+        z = f" · z p={sig.p_value_z:.4f}" if sig.p_value_z is not None else ""
+        lines.append(
+            f"  95% CI [{sig.ci_low:+.2%}, {sig.ci_high:+.2%}]"
+            f" · bootstrap p={sig.p_value_boot:.4f}{z}"
+        )
+    lines.append(f"  → {sig.verdict}")
+    for n in sig.notes:
+        lines.append(f"   · {n}")
+    return "\n".join(lines)
 
 
 def render(paths: list[Path], result, ledger: PositionLedger, dup: int, limit: int,
@@ -322,12 +347,17 @@ def main(argv: list[str] | None = None) -> int:
     ledger.apply_all(events)
 
     report = None
+    sig = None
     if ledger.chunks:
         prices = _load_prices(args.prices) if args.prices else None
         opens = open_positions_from_ledger(ledger, prices)
         report = compute_disposition(ledger.chunks, opens if prices is not None else None)
+        if prices is not None:
+            sig = bootstrap_disposition(ledger.chunks, opens)
 
     out_text = render(paths, merged, ledger, dup, args.limit, report)
+    if sig is not None:
+        out_text += "\n" + _render_significance(sig)
     print(out_text)
     if args.out:
         Path(args.out).write_text(report, encoding="utf-8")

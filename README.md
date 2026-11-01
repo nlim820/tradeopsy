@@ -18,17 +18,19 @@
 - **FIFO 配对引擎**（Decimal 记账，黄金样本测试）
 - **CSV 解析层**（编码/表头/列名自动适配）
 - **命令行体检报告**（`tradeopsy analyze`，逐笔已实现 + 按标的归因）
-- **处置效应引擎 PGR/PLR**（严格 Odean 1998 口径 + A 股持有期本土化，50 个测试全绿）
+- **处置效应引擎 PGR/PLR**（严格 Odean 1998 口径 + A 股持有期本土化，58 个测试全绿）
+- **显著性检验**（计数口径 bootstrap 置信区间 + 双比例 z 检验，小样本自动判"证据不足"）
 - **纸面账户日更管道**（每个交易日自动撮合、记账、出净值，跑在 GitHub Actions 上）
 
 一条命令看效果（离线、不联网）：
 
 ```bash
-python examples/disposition_demo.py        # 处置效应体检卡（Wrapped 风格）
-tradeopsy analyze fixtures                 # 完整体检报告（含行为归因板块）
+python examples/disposition_demo.py          # 处置效应体检卡 + 显著性（Wrapped 风格）
+python examples/disposition_demo.py --large  # 大样本教学：看显著性如何被检出
+tradeopsy analyze fixtures                   # 完整体检报告（含行为归因板块）
 ```
 
-还没有的：HTML 可视化报告、同行基准、PGR/PLR 的显著性检验（bootstrap）。进度见 [ROADMAP.md](ROADMAP.md)。
+还没有的：HTML 可视化报告、同行基准。进度见 [ROADMAP.md](ROADMAP.md)。
 
 ---
 
