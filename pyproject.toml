@@ -14,6 +14,11 @@ requires-python = ">=3.10"
 #   3. 所有金融计算用 Decimal，标准库就够
 dependencies = []
 
+# 可选：只有 tools/fetch_prices.py 拉行情时需要，核心与测试都不依赖它。
+#     pip install -e ".[fetch]"
+[project.optional-dependencies]
+fetch = ["akshare>=1.16"]
+
 [project.scripts]
 tradeopsy = "tradeopsy.__main__:main"
 tradeopsy-paper = "tradeopsy.paper.__main__:main"
