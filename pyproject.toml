@@ -15,6 +15,7 @@ requires-python = ">=3.10"
 dependencies = []
 
 [project.scripts]
+tradeopsy = "tradeopsy.__main__:main"
 tradeopsy-paper = "tradeopsy.paper.__main__:main"
 
 [tool.setuptools.packages.find]
