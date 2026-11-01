@@ -26,6 +26,9 @@ from .analytics.disposition import (
 )
 from .analytics.significance import SignificanceResult, bootstrap_disposition
 from .ledger import PositionLedger, summarize, timeline
+from .load import collect_inputs as _collect_inputs
+from .load import dedupe as _dedupe
+from .load import load_dataset, read_benchmark, read_calendar, read_prices
 from .model import EventType
 from .parsers import parse_file
 from .tradingcal import TradingCalendar
@@ -55,97 +58,6 @@ def _w(s: object) -> int:
 def _pad(s: object, width: int, align: str = "left") -> str:
     gap = max(0, width - _w(s))
     return (" " * gap + str(s)) if align == "right" else (str(s) + " " * gap)
-
-
-def _load_prices(path: str) -> dict[str, Decimal]:
-    """读未平仓标的最新价文件。
-
-    支持两种格式：带表头（证券代码/代码 + 最新价/价格）或不带表头（第1列代码、第2列价）。
-    行内若混入千分位逗号先去掉。
-    """
-    out: dict[str, Decimal] = {}
-    p = Path(path)
-    if not p.exists():
-        print(f"价文件不存在：{path}", file=sys.stderr)
-        return out
-    with p.open(encoding="utf-8-sig", newline="") as fh:
-        rows = list(csv.reader(fh))
-    if not rows:
-        return out
-    header = [c.strip() for c in rows[0]]
-    if header and header[0] in ("证券代码", "代码", "symbol", "Symbol"):
-        data = rows[1:]
-    else:
-        data = rows
-    for r in data:
-        if len(r) < 2:
-            continue
-        sym = r[0].strip()
-        try:
-            val = Decimal(r[1].strip().replace(",", ""))
-        except Exception:
-            continue
-        if sym:
-            out[sym] = val
-    return out
-
-
-def _load_calendar(path: str) -> TradingCalendar | None:
-    """读交易日历文件：每行一个 YYYY-MM-DD（可带表头，非日期行自动跳过）。
-
-    为什么用「日期列表」而不是内置节假日表：
-        A 股休市安排每年由交易所公告，硬编码一张表必然过期，
-        而过期的日历会静默算错持有期 —— 比没有日历更危险。
-        行情 bars 的日期序列是最权威的交易日定义（指数不会停牌），
-        导出成这个格式即可获得完全精确的日历。
-    """
-    p = Path(path)
-    if not p.exists():
-        print(f"日历文件不存在：{path}", file=sys.stderr)
-        return None
-    dates: list[date] = []
-    with p.open(encoding="utf-8-sig") as fh:
-        for raw in fh:
-            tok = raw.strip().split(",")[0].strip().strip('"').strip("'")
-            if not tok:
-                continue
-            try:
-                dates.append(date.fromisoformat(tok[:10]))
-            except ValueError:
-                continue
-    if not dates:
-        print(f"日历文件里没读到合法日期：{path}", file=sys.stderr)
-        return None
-    return TradingCalendar.from_dates(dates, source="bars")
-
-
-def _collect_inputs(target: Path) -> list[Path]:
-    if target.is_dir():
-        return sorted(
-            p for p in target.iterdir()
-            if p.is_file() and p.suffix.lower() in DATA_SUFFIXES and not p.name.startswith(".")
-        )
-    return [target] if target.exists() else []
-
-
-def _dedupe(events: list) -> tuple[list, int]:
-    """跨文件去重。
-
-    真实场景：用户按月导出，相邻两个文件的区间可能重叠几天
-    （比如 3 月文件带上了 4 月 1 日的成交）。不去重就是把同一笔算两遍，
-    而盈亏会直接翻倍 —— 这种错误看起来很"合理"，最难被发现。
-    """
-    seen: set[tuple] = set()
-    out = []
-    dup = 0
-    for e in sorted(events, key=lambda x: (x.dt, x.symbol, x.etype.value)):
-        key = (e.dt, e.symbol, e.etype, e.qty, e.price, e.fee, e.cash)
-        if key in seen:
-            dup += 1
-            continue
-        seen.add(key)
-        out.append(e)
-    return out, dup
 
 
 def _by_symbol(chunks: list) -> list[tuple[str, int, Decimal, int]]:
@@ -343,24 +255,38 @@ def render(paths: list[Path], result, ledger: PositionLedger, dup: int, limit: i
     return "\n".join(lines)
 
 
+def _add_common_args(p: argparse.ArgumentParser) -> None:
+    """analyze 与 report 共用的输入参数 —— 两个命令必须能接受完全相同的输入，
+    否则用户会在"命令行能跑、网页跑不出来"的差异上反复踩坑。"""
+    p.add_argument("input", nargs="?", default="private",
+                   help="交割单文件或目录，默认 private/")
+    p.add_argument("--prices", default=None,
+                   help="未平仓标的的最新价文件(CSV: 代码,价格)，用于算完整 PGR/PLR")
+    p.add_argument("--calendar", default=None,
+                   help="交易日历文件（每行 YYYY-MM-DD，建议用行情K线日期导出）；"
+                        "缺省按工作日近似")
+    p.add_argument("--natural-days", action="store_true",
+                   help="持有期用自然日（对照用，非A股严谨口径）")
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="tradeopsy", description="A股交割单体检：把流水变成看得懂的行为归因")
     sub = ap.add_subparsers(dest="cmd")
 
-    a = sub.add_parser("analyze", help="分析交割单（文件或目录）")
-    a.add_argument("input", nargs="?", default="private",
-                   help="交割单文件或目录，默认 private/")
+    a = sub.add_parser("analyze", help="终端里看体检报告（纯文本）")
+    _add_common_args(a)
     a.add_argument("--limit", type=int, default=0,
                    help="逐笔明细最多显示几笔，0=全部")
-    a.add_argument("--prices", default=None,
-                   help="未平仓标的的最新价文件(CSV: 代码,价格)，用于算完整 PGR/PLR")
-    a.add_argument("--calendar", default=None,
-                   help="交易日历文件（每行 YYYY-MM-DD，建议用行情K线日期导出）；"
-                        "缺省按工作日近似")
-    a.add_argument("--natural-days", action="store_true",
-                   help="持有期用自然日（对照用，非A股严谨口径）")
-    a.add_argument("--out", default=None, help="把报告同时写入文本文件")
+    a.add_argument("--out", default=None, help="把文本报告同时写入文件")
+
+    r = sub.add_parser("report", help="生成单文件 HTML 体检报告（可截图、可分享）")
+    _add_common_args(r)
+    r.add_argument("-o", "--out", default="tradeopsy-report.html",
+                   help="输出 HTML 路径，默认 tradeopsy-report.html")
+    r.add_argument("--benchmark", default=None,
+                   help="基准收盘价文件(CSV: YYYY-MM-DD,收盘价)，用于对比；不提供则不画")
+    r.add_argument("--title", default="交易体检报告", help="报告标题")
 
     sub.add_parser("formats", help="列出支持的格式")
 
@@ -371,61 +297,54 @@ def main(argv: list[str] | None = None) -> int:
         for p in PARSERS:
             print(f"{p.name:<16}{p.description}")
         return 0
+    if args.cmd is None:
+        ap.print_help()
+        return 0
 
-    target = Path(getattr(args, "input", "private"))
-    paths = _collect_inputs(target)
-    if not paths:
-        print(f"没找到可读的交割单。请把 CSV 放进 {target if target.is_dir() else 'private/'} 目录。",
-              file=sys.stderr)
+    target = Path(args.input)
+    if not _collect_inputs(target):
+        print(f"没找到可读的交割单。请把 CSV 放进 "
+              f"{target if target.is_dir() else 'private/'} 目录。", file=sys.stderr)
         print("该目录已在 .gitignore 中隔离，文件不会进 git。", file=sys.stderr)
         return 2
 
-    all_events = []
-    warnings_all = []
-    file_metas: list[tuple[str, dict]] = []
-    for p in paths:
-        r = parse_file(p)
-        all_events.extend(r.events)
-        warnings_all.extend(r.warnings)
-        file_metas.append((p.name, dict(r.meta)))
-
-    from .parsers.base import ParseResult
-    merged = ParseResult(events=all_events, warnings=warnings_all)
-    events, dup = _dedupe(merged.events)
-    merged.events = events
-
-    if not events:
-        print(render(paths, merged, PositionLedger(), dup, 0, None, file_metas))
+    ds = load_dataset(target, calendar_path=args.calendar,
+                      natural_days=args.natural_days)
+    if not ds.events:
+        from .parsers.base import ParseResult
+        merged = ParseResult(events=[], warnings=ds.warnings)
+        print(render(ds.paths, merged, PositionLedger(), ds.dup, 0, None,
+                     ds.file_metas, ds.calendar))
         print("解析成功 0 条事件。请检查上面的【文件】信息与【告警】。", file=sys.stderr)
         return 1
 
-    ledger = PositionLedger()
-    ledger.apply_all(events)
+    prices = read_prices(args.prices) if getattr(args, "prices", None) else None
 
-    # 交易日历：默认按工作日近似（远比自然日接近 A 股口径），
-    # 给了 --calendar 就用行情 K 线日期（完全精确），--natural-days 显式退回自然日。
-    span = timeline(events)
-    calendar: TradingCalendar | None = None
-    if not args.natural_days:
-        if args.calendar:
-            calendar = _load_calendar(args.calendar)
-        if calendar is None and span is not None:
-            calendar = TradingCalendar.weekday_approx(span[0], span[1])
+    if args.cmd == "report":
+        from .report import build_report
 
-    report = None
-    sig = None
-    if ledger.chunks:
-        prices = _load_prices(args.prices) if args.prices else None
-        opens = open_positions_from_ledger(ledger, prices)
-        report = compute_disposition(
-            ledger.chunks,
-            opens if prices is not None else None,
-            trading_calendar=calendar,
-        )
-        if prices is not None:
-            sig = bootstrap_disposition(ledger.chunks, opens)
+        if prices:
+            print(f"未平仓价格：{len(prices)} 只", file=sys.stderr)
+        bench = read_benchmark(args.benchmark) if args.benchmark else {}
+        if args.benchmark and not bench:
+            print(f"基准文件没读到有效数据：{args.benchmark}", file=sys.stderr)
+        html = build_report(ds, prices=prices or None, benchmark=bench or None,
+                            title=args.title)
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(html, encoding="utf-8")
+        size_kb = len(html.encode("utf-8")) / 1024
+        print(f"报告已生成：{out.resolve()}（{size_kb:.0f} KB，单文件、离线可看）")
+        print("提醒：报告含你的持仓标的与金额，分享前请确认是否要脱敏。")
+        return 0
 
-    out_text = render(paths, merged, ledger, dup, args.limit, report, file_metas, calendar)
+    report = ds.disposition(prices or None)
+    sig = ds.significance(prices or None) if prices else None
+
+    from .parsers.base import ParseResult
+    merged = ParseResult(events=ds.events, warnings=ds.warnings)
+    out_text = render(ds.paths, merged, ds.ledger, ds.dup, args.limit,
+                      report, ds.file_metas, ds.calendar)
     if sig is not None:
         out_text += "\n" + _render_significance(sig)
     print(out_text)

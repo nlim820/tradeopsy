@@ -21,20 +21,24 @@
 - **处置效应引擎 PGR/PLR**（严格 Odean 1998 口径 + A 股持有期本土化）
 - **显著性检验**（计数口径 bootstrap 置信区间 + 双比例 z 检验，小样本自动判"证据不足"）
 - **交易日历**（持有期按 A 股交易日口径，支持行情日期精确日历 / 工作日近似降级）
+- **单文件 HTML 体检报告**（`tradeopsy report`，零外部依赖、离线可看、每个数字可展开审计）
 - **示例账户数据集**（12 个月 / 两种券商格式 / 含送转配股分红可转债，可复现可测试）
 - **纸面账户日更管道**（每个交易日自动撮合、记账、出净值，跑在 GitHub Actions 上）
 
-**95 个测试全绿。**
+**114 个测试全绿。**
 
 一条命令看效果（离线、不联网）：
 
 ```bash
-# 完整体检报告：两种券商格式 + 送转/配股/分红/可转债 + 处置效应 + 显著性
+# 生成单文件 HTML 体检报告（自带示例版：examples/sample_account_report.html）
+PYTHONPATH=src python -m tradeopsy report examples/sample_account \
+    --prices examples/sample_account_prices.csv -o report.html
+
+# 终端里看文本版
 PYTHONPATH=src python -m tradeopsy analyze examples/sample_account \
     --prices examples/sample_account_prices.csv
 
 python examples/disposition_demo.py          # 处置效应体检卡 + 显著性（Wrapped 风格）
-python examples/disposition_demo.py --large  # 大样本教学：看显著性如何被检出
 PYTHONPATH=src python -m tradeopsy analyze fixtures   # 最小黄金样本
 ```
 
@@ -45,7 +49,7 @@ PYTHONPATH=src python -m tradeopsy analyze fixtures   # 最小黄金样本
 想完全精确就给它一份行情 K 线日期（`--calendar`）；`--natural-days` 可退回自然日做对照。
 自然日会系统性高估持有期 —— 示例账户上赢家 52.1 自然日 ≈ 37.5 交易日，差 28%。
 
-还没有的：HTML 可视化报告、同行基准。进度见 [ROADMAP.md](ROADMAP.md)。
+还没有的：同行基准分位、逐卖出日滚动窗口口径。进度见 [ROADMAP.md](ROADMAP.md)。
 
 ---
 

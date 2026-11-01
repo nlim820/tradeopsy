@@ -85,3 +85,15 @@ python examples/sample_account/generate.py
   ETF 佣金万 1、免印花税；可转债佣金万 1、无最低。你的实际费率可能不同。
 - **公司行为是构造的**。真实的送转比例、分红金额、配股价格以公告为准，
   这里仅为演示"账本能正确处理这类事件"，不代表任何真实公司的实际方案。
+
+## 一键生成体检报告
+
+```bash
+# 文本版（终端）
+PYTHONPATH=src python -m tradeopsy analyze examples/sample_account \
+    --prices ../sample_account_prices.csv
+
+# HTML 版（单文件，双击即可离线查看；仓库自带生成好的：../sample_account_report.html）
+PYTHONPATH=src python -m tradeopsy report examples/sample_account \
+    --prices examples/sample_account_prices.csv -o report.html
+```
