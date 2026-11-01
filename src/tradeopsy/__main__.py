@@ -15,6 +15,7 @@ import csv
 import sys
 import unicodedata
 from collections import defaultdict
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from .analytics.significance import SignificanceResult, bootstrap_disposition
 from .ledger import PositionLedger, summarize, timeline
 from .model import EventType
 from .parsers import parse_file
+from .tradingcal import TradingCalendar
 
 TYPE_CN = {
     EventType.BUY: "买入",
@@ -88,6 +90,35 @@ def _load_prices(path: str) -> dict[str, Decimal]:
     return out
 
 
+def _load_calendar(path: str) -> TradingCalendar | None:
+    """读交易日历文件：每行一个 YYYY-MM-DD（可带表头，非日期行自动跳过）。
+
+    为什么用「日期列表」而不是内置节假日表：
+        A 股休市安排每年由交易所公告，硬编码一张表必然过期，
+        而过期的日历会静默算错持有期 —— 比没有日历更危险。
+        行情 bars 的日期序列是最权威的交易日定义（指数不会停牌），
+        导出成这个格式即可获得完全精确的日历。
+    """
+    p = Path(path)
+    if not p.exists():
+        print(f"日历文件不存在：{path}", file=sys.stderr)
+        return None
+    dates: list[date] = []
+    with p.open(encoding="utf-8-sig") as fh:
+        for raw in fh:
+            tok = raw.strip().split(",")[0].strip().strip('"').strip("'")
+            if not tok:
+                continue
+            try:
+                dates.append(date.fromisoformat(tok[:10]))
+            except ValueError:
+                continue
+    if not dates:
+        print(f"日历文件里没读到合法日期：{path}", file=sys.stderr)
+        return None
+    return TradingCalendar.from_dates(dates, source="bars")
+
+
 def _collect_inputs(target: Path) -> list[Path]:
     if target.is_dir():
         return sorted(
@@ -146,9 +177,17 @@ def _render_disposition(rep: DispositionReport) -> list[str]:
         lines.append(f"  → {rep.verdict}")
         lines.append("  提示：分析时加 --prices 价文件 可算完整 PGR/PLR。")
     lines.append(
-        f"  胜率 {rep.win_rate:.2%} · 赢家均持 {rep.avg_hold_win} 天"
-        f" · 输家均持 {rep.avg_hold_loss} 天"
+        f"  胜率 {rep.win_rate:.2%} · 赢家均持 {rep.avg_hold_win} "
+        f"{'交易日' if rep.hold_days_trading else '自然日'}"
+        f" · 输家均持 {rep.avg_hold_loss} "
+        f"{'交易日' if rep.hold_days_trading else '自然日'}"
     )
+    if rep.hold_days_trading and rep.avg_hold_win_calendar:
+        # 把两种口径同时摆出来：口径差多少是可见的，读者不必信任一个孤零零的数
+        lines.append(
+            f"  （同一口径对照：按自然日 赢家 {rep.avg_hold_win_calendar} 天"
+            f" / 输家 {rep.avg_hold_loss_calendar} 天）"
+        )
     for n in rep.notes:
         lines.append(f"   · {n}")
     return lines
@@ -180,7 +219,8 @@ def _render_significance(sig: SignificanceResult) -> str:
 
 def render(paths: list[Path], result, ledger: PositionLedger, dup: int, limit: int,
            report: DispositionReport | None = None,
-           file_metas: list[tuple[str, dict]] | None = None) -> str:
+           file_metas: list[tuple[str, dict]] | None = None,
+           calendar: TradingCalendar | None = None) -> str:
     lines: list[str] = []
     bar = "=" * 70
 
@@ -225,8 +265,10 @@ def render(paths: list[Path], result, ledger: PositionLedger, dup: int, limit: i
         counts.items(), key=lambda kv: -kv[1]))
     lines.append(f"  {detail}")
 
-    s = summarize(ledger)
+    s = summarize(ledger, calendar)
     lines.append("\n【交易汇总】")
+    if calendar is not None:
+        lines.append(f"  持有期口径 {calendar.describe()}")
     pct_keys = {"胜率"}
     for k, v in s.items():
         if k == "盈亏比" and v is None:
@@ -255,20 +297,23 @@ def render(paths: list[Path], result, ledger: PositionLedger, dup: int, limit: i
     chunks = ledger.chunks
     shown = chunks if limit <= 0 else chunks[:limit]
     if shown:
+        unit = "交易日" if calendar is not None else "自然日"
         lines.append(f"\n【逐笔已实现】{'全部' if limit <= 0 else f'前 {len(shown)} 笔'}")
         lines.append(
             f"  {_pad('标的', 9)}{_pad('建仓', 12)}{_pad('平仓', 12)}"
             f"{_pad('数量', 8, 'right')}{_pad('成本', 12, 'right')}"
-            f"{_pad('净收入', 12, 'right')}{_pad('盈亏', 11, 'right')}{_pad('天数', 6, 'right')}"
+            f"{_pad('净收入', 12, 'right')}{_pad('盈亏', 11, 'right')}"
+            f"{_pad(unit, 7, 'right')}"
         )
         for c in shown:
+            held = calendar.count(c.open_dt, c.close_dt) if calendar is not None else c.hold_days
             lines.append(
                 f"  {_pad(c.symbol, 9)}{_pad(c.open_dt, 12)}{_pad(c.close_dt, 12)}"
                 f"{_pad(f'{float(c.qty):.0f}', 8, 'right')}"
                 f"{_pad(f'{float(c.cost):,.2f}', 12, 'right')}"
                 f"{_pad(f'{float(c.proceeds):,.2f}', 12, 'right')}"
                 f"{_pad(f'{float(c.pnl):,.2f}', 11, 'right')}"
-                f"{_pad(c.hold_days, 6, 'right')}"
+                f"{_pad(held, 7, 'right')}"
             )
 
     open_pos = ledger.open_positions()
@@ -310,6 +355,11 @@ def main(argv: list[str] | None = None) -> int:
                    help="逐笔明细最多显示几笔，0=全部")
     a.add_argument("--prices", default=None,
                    help="未平仓标的的最新价文件(CSV: 代码,价格)，用于算完整 PGR/PLR")
+    a.add_argument("--calendar", default=None,
+                   help="交易日历文件（每行 YYYY-MM-DD，建议用行情K线日期导出）；"
+                        "缺省按工作日近似")
+    a.add_argument("--natural-days", action="store_true",
+                   help="持有期用自然日（对照用，非A股严谨口径）")
     a.add_argument("--out", default=None, help="把报告同时写入文本文件")
 
     sub.add_parser("formats", help="列出支持的格式")
@@ -352,16 +402,30 @@ def main(argv: list[str] | None = None) -> int:
     ledger = PositionLedger()
     ledger.apply_all(events)
 
+    # 交易日历：默认按工作日近似（远比自然日接近 A 股口径），
+    # 给了 --calendar 就用行情 K 线日期（完全精确），--natural-days 显式退回自然日。
+    span = timeline(events)
+    calendar: TradingCalendar | None = None
+    if not args.natural_days:
+        if args.calendar:
+            calendar = _load_calendar(args.calendar)
+        if calendar is None and span is not None:
+            calendar = TradingCalendar.weekday_approx(span[0], span[1])
+
     report = None
     sig = None
     if ledger.chunks:
         prices = _load_prices(args.prices) if args.prices else None
         opens = open_positions_from_ledger(ledger, prices)
-        report = compute_disposition(ledger.chunks, opens if prices is not None else None)
+        report = compute_disposition(
+            ledger.chunks,
+            opens if prices is not None else None,
+            trading_calendar=calendar,
+        )
         if prices is not None:
             sig = bootstrap_disposition(ledger.chunks, opens)
 
-    out_text = render(paths, merged, ledger, dup, args.limit, report, file_metas)
+    out_text = render(paths, merged, ledger, dup, args.limit, report, file_metas, calendar)
     if sig is not None:
         out_text += "\n" + _render_significance(sig)
     print(out_text)

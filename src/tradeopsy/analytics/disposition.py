@@ -38,6 +38,7 @@ from typing import Iterable, Optional
 
 from ..ledger import PositionLedger
 from ..model import RealizedChunk, money
+from ..tradingcal import TradingCalendar
 
 
 @dataclass(frozen=True)
@@ -73,6 +74,9 @@ class DispositionReport:
     avg_hold_win: float
     avg_hold_loss: float
     hold_days_trading: bool
+    #: 自然日口径的平均持有期，仅用于和交易日口径对照展示（口径差异的证据）
+    avg_hold_win_calendar: float = 0.0
+    avg_hold_loss_calendar: float = 0.0
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -111,21 +115,45 @@ def _classify(chunks: list[RealizedChunk]) -> tuple[Decimal, Decimal, list[Reali
     return rg, rl, wins, losses
 
 
-def _avg_hold(items: list[RealizedChunk], calendar: Optional[set[date]]) -> float:
+def _normalize_calendar(
+    cal: "TradingCalendar | set[date] | None",
+) -> TradingCalendar | None:
+    """兼容两种入参：TradingCalendar 直接用，set[date] 包一层，None 透传。
+
+    保留 set 支持不是为了偷懒 —— 老测试与外部调用都按 set 传，
+    破坏性改签名会让下游静默出错，这类兼容层成本远低于它的价值。
+    """
+    if cal is None or isinstance(cal, TradingCalendar):
+        return cal
+    return TradingCalendar.from_dates(cal, source="explicit")
+
+
+def _avg_hold(
+    items: list[RealizedChunk], calendar: TradingCalendar | None
+) -> tuple[float, bool]:
+    """平均持有期。返回 (天数, 是否被日历完整覆盖)。
+
+    交易日口径下用二分计数，复杂度 O(n log m)；
+    自然日口径下直接用 chunk.hold_days，是底层事实，不加工。
+    """
     if not items:
-        return 0.0
+        return 0.0, True
     if calendar is None:
-        days = [c.hold_days for c in items]
-    else:
-        days = [sum(1 for d in calendar if c.open_dt < d <= c.close_dt) for c in items]
-    return round(sum(days) / len(days), 1)
+        return round(sum(c.hold_days for c in items) / len(items), 1), False
+    counts: list[int] = []
+    covered = True
+    for c in items:
+        n, ok = calendar.count_checked(c.open_dt, c.close_dt)
+        counts.append(n)
+        covered = covered and ok
+    return round(sum(counts) / len(counts), 1), covered
 
 
 def compute_disposition(
     chunks: Iterable[RealizedChunk],
     open_positions: Optional[Iterable[OpenPositionMV]] = None,
     *,
-    trading_calendar: Optional[set[date]] = None,
+    trading_calendar: "TradingCalendar | set[date] | None" = None,
 ) -> DispositionReport:
     """Odean (1998) 处置效应度量。
 
@@ -133,11 +161,13 @@ def compute_disposition(
         chunks          已实现盈亏片段（来自 ledger.chunks）
         open_positions  未平仓头寸 + 当前市值（来自行情）；为 None 时退化为
                         realized_only 模式，PGR/PLR 不可计算
-        trading_calendar 交易日集合（set[date]）；传入则持有天数按交易日算（A股口径）
+        trading_calendar 交易日历（TradingCalendar 或 set[date]）；
+                        传入则持有天数按 A 股交易日口径算，不传则按自然日
 
     返回 DispositionReport，含 PGR/PLR/处置效应/人格判定与辅助统计。
     """
     chunks = list(chunks)
+    cal = _normalize_calendar(trading_calendar)
     rg, rl, wins, losses = _classify(chunks)
 
     pg = Decimal("0")   # paper gain
@@ -160,14 +190,21 @@ def compute_disposition(
         plr = float(rl / (rl + pl)) if (rl + pl) > 0 else None
         de = (pgr - plr) if (pgr is not None and plr is not None) else None
 
-    avg_win = _avg_hold(wins, trading_calendar)
-    avg_loss = _avg_hold(losses, trading_calendar)
+    avg_win, cov_win = _avg_hold(wins, cal)
+    avg_loss, cov_loss = _avg_hold(losses, cal)
+    # 自然日口径恒为对照值，用来展示"两种口径差多少"
+    cal_win, _ = _avg_hold(wins, None)
+    cal_loss, _ = _avg_hold(losses, None)
 
     notes: list[str] = []
     if mode == "realized_only":
         notes.append("未提供未平仓市值，PGR/PLR 不可用；以下仅为已实现部分画像。")
-    if trading_calendar is not None:
-        notes.append("持有天数按交易日计算（A股口径）。")
+    if cal is not None:
+        notes.append(f"持有天数按交易日计算（A股口径）· {cal.describe()}")
+        if not (cov_win and cov_loss):
+            notes.append(
+                "部分持仓区间超出交易日历覆盖范围，持有期可能偏小，结论请保守看待。"
+            )
     else:
         notes.append("持有天数按自然日计算；A股严谨口径应为交易日（P5 技术债）。")
 
@@ -185,7 +222,9 @@ def compute_disposition(
         win_rate=round(len(wins) / len(chunks), 4) if chunks else 0.0,
         avg_hold_win=avg_win,
         avg_hold_loss=avg_loss,
-        hold_days_trading=trading_calendar is not None,
+        hold_days_trading=cal is not None,
+        avg_hold_win_calendar=cal_win,
+        avg_hold_loss_calendar=cal_loss,
         notes=notes,
     )
 

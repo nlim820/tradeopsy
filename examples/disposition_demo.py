@@ -35,6 +35,7 @@ from tradeopsy.analytics.disposition import (  # noqa: E402
 from tradeopsy.analytics.significance import bootstrap_disposition  # noqa: E402
 from tradeopsy.ledger import PositionLedger  # noqa: E402
 from tradeopsy.model import Event, EventType, RealizedChunk, money  # noqa: E402
+from tradeopsy.tradingcal import TradingCalendar  # noqa: E402
 
 D = Decimal
 REPO = Path(__file__).resolve().parents[1]
@@ -117,9 +118,13 @@ def _card(rep, source: str) -> str:
         lines.append(f"  已实现盈利 {rep.realized_gain:,.2f} · 已实现亏损 {rep.realized_loss:,.2f}")
         lines.append(f"\n  → {rep.verdict}")
 
+    unit = "交易日" if rep.hold_days_trading else "自然日"
     lines.append(f"\n  胜率 {rep.win_rate:.2%}"
-                 f" · 赢家平均持有 {rep.avg_hold_win} 天"
-                 f" · 输家平均持有 {rep.avg_hold_loss} 天")
+                 f" · 赢家平均持有 {rep.avg_hold_win} {unit}"
+                 f" · 输家平均持有 {rep.avg_hold_loss} {unit}")
+    if rep.hold_days_trading and rep.avg_hold_win_calendar:
+        lines.append(f"  （按自然日对照：赢家 {rep.avg_hold_win_calendar} 天"
+                     f" · 输家 {rep.avg_hold_loss_calendar} 天）")
     if rep.avg_hold_win and rep.avg_hold_loss and rep.mode == "full":
         if rep.avg_hold_win < rep.avg_hold_loss:
             lines.append("  （赢家拿得比输家短 —— 处置效应的典型指纹）")
@@ -202,7 +207,15 @@ def main() -> int:
         opens = open_positions_from_ledger(ledger, _synthetic_prices())
         chunks = ledger.chunks
 
-    rep = compute_disposition(chunks, opens)
+    # 交易日口径：离线演示没有行情 K 线，用工作日近似（比自然日接近 A 股实际）。
+    # 真实使用时 `analyze --calendar 行情日期.csv` 可拿到完全精确的日历。
+    cal = None
+    if chunks:
+        cal = TradingCalendar.weekday_approx(
+            min(c.open_dt for c in chunks), max(c.close_dt for c in chunks)
+        )
+
+    rep = compute_disposition(chunks, opens, trading_calendar=cal)
     sig = bootstrap_disposition(chunks, opens)
     print(_card(rep, source))
     print(_sig_card(sig))

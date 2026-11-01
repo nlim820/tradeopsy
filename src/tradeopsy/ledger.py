@@ -17,6 +17,7 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import date
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 from .model import (
     Event,
@@ -27,6 +28,9 @@ from .model import (
     money,
     unit_price,
 )
+
+if TYPE_CHECKING:  # 仅类型标注用，避免运行期循环导入
+    from .tradingcal import TradingCalendar
 
 
 class LedgerError(Exception):
@@ -217,8 +221,12 @@ class PositionLedger:
         self.warnings.append(f"[{ev.dt}] {ev.symbol} {ev.etype.value}: {msg}")
 
 
-def summarize(ledger: PositionLedger) -> dict:
-    """汇总一份可读的统计结果（不含行情相关指标）。"""
+def summarize(ledger: PositionLedger, calendar: "TradingCalendar | None" = None) -> dict:
+    """汇总一份可读的统计结果（不含行情相关指标）。
+
+    calendar 传入时，「平均持有天数」按 A 股交易日口径统计；
+    不传则退回自然日 —— 自然日是账本里的事实值，交易日才是与学术口径对齐的值。
+    """
     chunks = ledger.chunks
     wins = [c for c in chunks if c.is_win]
     losses = [c for c in chunks if not c.is_win]
@@ -229,8 +237,11 @@ def summarize(ledger: PositionLedger) -> dict:
     def avg_days(items: list[RealizedChunk]) -> float:
         if not items:
             return 0.0
-        return round(sum(c.hold_days for c in items) / len(items), 1)
+        if calendar is None:
+            return round(sum(c.hold_days for c in items) / len(items), 1)
+        return round(sum(calendar.count(c.open_dt, c.close_dt) for c in items) / len(items), 1)
 
+    unit = "交易日" if calendar is not None else "自然日"
     return {
         "成交笔数": len(chunks),
         "盈利笔数": len(wins),
@@ -242,9 +253,9 @@ def summarize(ledger: PositionLedger) -> dict:
         "已实现价差盈亏": float(ledger.realized_pnl()),
         "现金分红": float(ledger.total_dividend()),
         "已实现总收益": float(ledger.total_pnl()),
-        "平均持有天数": avg_days(chunks),
-        "盈利笔平均持有天数": avg_days(wins),
-        "亏损笔平均持有天数": avg_days(losses),
+        f"平均持有{unit}": avg_days(chunks),
+        f"盈利笔平均持有{unit}": avg_days(wins),
+        f"亏损笔平均持有{unit}": avg_days(losses),
         "买入费用合计": float(ledger.buy_fees),
         "卖出费用合计": float(ledger.sell_fees),
         "未平仓批次": len(ledger.open_positions()),
