@@ -4,14 +4,18 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tradeopsy"
-version = "0.0.1"
+version = "0.2.0"
 description = "A股交割单体检报告：严格学术口径的交易行为归因"
 readme = "README.md"
 requires-python = ">=3.10"
+# 刻意保持零第三方依赖。理由：
+#   1. 用户本地 pip install 时不该被拖进 akshare 那一大坨
+#   2. GitHub Actions 每次装包都从零开始，依赖越少成功率越高
+#   3. 所有金融计算用 Decimal，标准库就够
 dependencies = []
 
-[project.optional-dependencies]
-market = ["akshare>=1.12"]
+[project.scripts]
+tradeopsy-paper = "tradeopsy.paper.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

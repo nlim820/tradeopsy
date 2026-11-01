@@ -1,0 +1,72 @@
+name: paper-trading
+
+# 每个交易日收盘后自动跑一次纸面账户。
+#
+# 时间选择：cron 用 UTC，北京时间 15:40 = 07:40 UTC。
+# 为什么不卡 15:00 收盘就跑：东财/腾讯的日线要过几分钟才落定，
+# 抢跑拿到的是当日未完成 K 线，撮合价会错，而且错得毫无提示。
+on:
+  schedule:
+    - cron: "40 7 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      today:
+        description: "截止日期 YYYY-MM-DD（留空=今天）"
+        required: false
+        default: ""
+      dry_run:
+        description: "只算不落盘"
+        type: boolean
+        default: false
+
+# 需要写权限才能把账本 commit 回仓库。
+# 这是本项目"自动化"最直观的自证：commit 历史就是运维日志。
+permissions:
+  contents: write
+
+# 防止手动触发和定时任务撞车，产生重复撮合。
+concurrency:
+  group: paper-trading
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: 运行纸面账户
+        id: run
+        run: |
+          ARGS="--root ."
+          if [ -n "${{ inputs.today }}" ]; then ARGS="$ARGS --today ${{ inputs.today }}"; fi
+          if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          python -m tradeopsy.paper $ARGS
+          echo "### 纸面账户 $(date -u +%F)" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          tail -n 12 paper/nav.csv >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: 提交账本
+        if: ${{ inputs.dry_run != 'true' }}
+        run: |
+          git config user.name "paper-bot"
+          git config user.email "paper-bot@users.noreply.github.com"
+          git add paper/
+          if git diff --cached --quiet; then
+            echo "今日无变更（非交易日或已跑过），跳过提交"
+            exit 0
+          fi
+          git commit -m "chore(paper): $(date -u +%F) 日更"
+          git push

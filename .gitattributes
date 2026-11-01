@@ -1,0 +1,4 @@
+# 统一用 LF。仓库里的 YAML 被转成 CRLF 会让 Actions 解析出意外问题，
+# CSV 被转成 CRLF 则会让本地 diff 出现噪声。
+* text=auto eol=lf
+*.csv text eol=lf
