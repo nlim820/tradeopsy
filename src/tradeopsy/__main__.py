@@ -11,12 +11,18 @@ stdin 传进来的几乎一定是用户手工复制粘贴的残缺版本，
 from __future__ import annotations
 
 import argparse
+import csv
 import sys
 import unicodedata
 from collections import defaultdict
 from decimal import Decimal
 from pathlib import Path
 
+from .analytics.disposition import (
+    DispositionReport,
+    compute_disposition,
+    open_positions_from_ledger,
+)
 from .ledger import PositionLedger, summarize, timeline
 from .model import EventType
 from .parsers import parse_file
@@ -46,6 +52,39 @@ def _w(s: object) -> int:
 def _pad(s: object, width: int, align: str = "left") -> str:
     gap = max(0, width - _w(s))
     return (" " * gap + str(s)) if align == "right" else (str(s) + " " * gap)
+
+
+def _load_prices(path: str) -> dict[str, Decimal]:
+    """读未平仓标的最新价文件。
+
+    支持两种格式：带表头（证券代码/代码 + 最新价/价格）或不带表头（第1列代码、第2列价）。
+    行内若混入千分位逗号先去掉。
+    """
+    out: dict[str, Decimal] = {}
+    p = Path(path)
+    if not p.exists():
+        print(f"价文件不存在：{path}", file=sys.stderr)
+        return out
+    with p.open(encoding="utf-8-sig", newline="") as fh:
+        rows = list(csv.reader(fh))
+    if not rows:
+        return out
+    header = [c.strip() for c in rows[0]]
+    if header and header[0] in ("证券代码", "代码", "symbol", "Symbol"):
+        data = rows[1:]
+    else:
+        data = rows
+    for r in data:
+        if len(r) < 2:
+            continue
+        sym = r[0].strip()
+        try:
+            val = Decimal(r[1].strip().replace(",", ""))
+        except Exception:
+            continue
+        if sym:
+            out[sym] = val
+    return out
 
 
 def _collect_inputs(target: Path) -> list[Path]:
@@ -91,7 +130,31 @@ def _by_symbol(chunks: list) -> list[tuple[str, int, Decimal, int]]:
     return rows
 
 
-def render(paths: list[Path], result, ledger: PositionLedger, dup: int, limit: int) -> str:
+def _render_disposition(rep: DispositionReport) -> list[str]:
+    """处置效应板块。纯文本、离线可用。"""
+    lines: list[str] = []
+    lines.append("\n【处置效应 · 行为归因】")
+    if rep.has_full:
+        lines.append(f"  PGR 盈利实现比例  {rep.pgr:.2%}")
+        lines.append(f"  PLR 亏损实现比例  {rep.plr:.2%}")
+        lines.append(f"  处置效应 DE       {rep.disposition_effect:+.2%}")
+        lines.append(f"  → {rep.verdict}")
+    else:
+        lines.append("  PGR/PLR 不可用（未提供未平仓市值）：")
+        lines.append(f"  已实现盈利 {rep.realized_gain:,.2f} · 已实现亏损 {rep.realized_loss:,.2f}")
+        lines.append(f"  → {rep.verdict}")
+        lines.append("  提示：分析时加 --prices 价文件 可算完整 PGR/PLR。")
+    lines.append(
+        f"  胜率 {rep.win_rate:.2%} · 赢家均持 {rep.avg_hold_win} 天"
+        f" · 输家均持 {rep.avg_hold_loss} 天"
+    )
+    for n in rep.notes:
+        lines.append(f"   · {n}")
+    return lines
+
+
+def render(paths: list[Path], result, ledger: PositionLedger, dup: int, limit: int,
+           report: DispositionReport | None = None) -> str:
     lines: list[str] = []
     bar = "=" * 70
 
@@ -196,6 +259,9 @@ def render(paths: list[Path], result, ledger: PositionLedger, dup: int, limit: i
         if len(all_warn) > 15:
             lines.append(f"  ... 另 {len(all_warn) - 15} 条")
 
+    if report is not None:
+        lines.extend(_render_disposition(report))
+
     lines.append("")
     return "\n".join(lines)
 
@@ -210,6 +276,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="交割单文件或目录，默认 private/")
     a.add_argument("--limit", type=int, default=0,
                    help="逐笔明细最多显示几笔，0=全部")
+    a.add_argument("--prices", default=None,
+                   help="未平仓标的的最新价文件(CSV: 代码,价格)，用于算完整 PGR/PLR")
     a.add_argument("--out", default=None, help="把报告同时写入文本文件")
 
     sub.add_parser("formats", help="列出支持的格式")
@@ -253,8 +321,14 @@ def main(argv: list[str] | None = None) -> int:
     ledger = PositionLedger()
     ledger.apply_all(events)
 
-    report = render(paths, merged, ledger, dup, args.limit)
-    print(report)
+    report = None
+    if ledger.chunks:
+        prices = _load_prices(args.prices) if args.prices else None
+        opens = open_positions_from_ledger(ledger, prices)
+        report = compute_disposition(ledger.chunks, opens if prices is not None else None)
+
+    out_text = render(paths, merged, ledger, dup, args.limit, report)
+    print(out_text)
     if args.out:
         Path(args.out).write_text(report, encoding="utf-8")
         print(f"报告已写入 {args.out}")

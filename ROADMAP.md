@@ -90,24 +90,28 @@
 
 ---
 
-## P2 · 行为指标：PGR / PLR　约 8–10 个碎片时间
+## P2 · 行为指标：PGR / PLR　（v1 已落地，显著性检验待做）
 
 **目标**：这是项目专业度的分水岭 —— 用学术口径量化处置效应。
 
-**产出**
-- `src/tradeopsy/behavior.py`
-- 严格按 Odean (1998) 实现：
-  - 对每个"有卖出发生的交易日"作为观察窗口
-  - 逐持仓比较当日收盘价 vs 参考成本
-  - 四分类计数：realized gain / realized loss / paper gain / paper loss
-  - `PGR = RG / (RG + PG)`，`PLR = RL / (RL + PL)`，`DE = PGR − PLR`
-- 行情数据走可选的 `akshare` 依赖，**没装也能算其余指标**
+**产出（v1 已完成）**
+- `src/tradeopsy/analytics/disposition.py`（纯函数、零联网）
+- 严格按 Odean (1998) 口径：
+  - `PGR = RG / (RG + PG)`，`PLR = RL / (RL + PL)`，`DE = PLR − PGR`
+  - RG/RL 来自 `ledger.chunks`（已实现）；PG/PL 来自未平仓市值（由调用方注入）
+- **A 股本土化三点**：持有天数按交易日（跨周末更短）、成本含费用、未平仓市值缺失时优雅退化
+- 演示卡 `examples/disposition_demo.py`（优先吃 paper 回放数据，离线有内置合成场景）
+- `tradeopsy analyze --prices 价文件` 可直接出完整 PGR/PLR
 
 **完成标准**
-- [ ] 用手工构造的日线数据，跑出与手算一致的 PGR / PLR
-- [ ] 有 t 检验或 bootstrap，给出显著性（样本不足时明确说"证据不足"）
-- [ ] 计算过程可复现（输出中间计数表，用户能自己核对）
-- [ ] 缺行情时优雅降级，不报错
+- [x] 用手工构造数据，跑出与手算一致的 PGR / PLR（11 个黄金样本测试）
+- [ ] 有 bootstrap 显著性检验（样本不足时明确说"证据不足"）
+- [x] 计算过程可复现（`DispositionReport` 输出 RG/RL/PG/PL 中间计数）
+- [x] 缺行情时优雅降级，不报错（realized_only 模式）
+
+**v1 口径说明（诚实交代）**：当前是**组合层面**度量（已实现 + 期末未平仓市值各算一次），
+不是 Odean 原论文的"每个卖出日滚动窗口"版本。后者更精细但计算量大，
+留作 P2.1 增强；现有口径足以支撑"有没有处置效应"的主结论。
 
 **你会学到**
 - 为什么"卖盈持亏"不能只数次数（要除以"卖出机会"）

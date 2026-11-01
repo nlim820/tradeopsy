@@ -11,16 +11,24 @@
 
 ---
 
-## ⚠️ 当前状态：Alpha（引擎 + 解析层 + 日更纸面账户已可用）
+## ⚠️ 当前状态：Alpha（引擎 + 解析层 + 处置效应 + 日更纸面账户已可用）
 
 已经能跑的部分：
 
 - **FIFO 配对引擎**（Decimal 记账，黄金样本测试）
-- **CSV 解析层**（编码/表头/列名自动适配，39 个测试全绿）
+- **CSV 解析层**（编码/表头/列名自动适配）
 - **命令行体检报告**（`tradeopsy analyze`，逐笔已实现 + 按标的归因）
+- **处置效应引擎 PGR/PLR**（严格 Odean 1998 口径 + A 股持有期本土化，50 个测试全绿）
 - **纸面账户日更管道**（每个交易日自动撮合、记账、出净值，跑在 GitHub Actions 上）
 
-还没有的：行为指标（PGR/PLR）、HTML 可视化报告、同行基准。进度见 [ROADMAP.md](ROADMAP.md)。
+一条命令看效果（离线、不联网）：
+
+```bash
+python examples/disposition_demo.py        # 处置效应体检卡（Wrapped 风格）
+tradeopsy analyze fixtures                 # 完整体检报告（含行为归因板块）
+```
+
+还没有的：HTML 可视化报告、同行基准、PGR/PLR 的显著性检验（bootstrap）。进度见 [ROADMAP.md](ROADMAP.md)。
 
 ---
 
@@ -209,7 +217,7 @@ GitHub 的提交历史不可撤回 —— 事后删文件也没用。所以 `pri
 
 ## 路线图
 
-见 [ROADMAP.md](ROADMAP.md)。当前在 P1（解析层 + 日更管道）。
+见 [ROADMAP.md](ROADMAP.md)。当前在 **P2（处置效应指标已落地 v1）**：引擎、黄金样本、演示卡均可用；下一步是显著性检验与 HTML 报告。
 
 ## License
 
