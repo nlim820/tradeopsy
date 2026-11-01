@@ -104,6 +104,99 @@ def _two_prop_p(p1: float, n1: int, p2: float, n2: int) -> Optional[float]:
     return 2.0 * (1.0 - _norm_cdf(abs(z)))
 
 
+@dataclass
+class DeInterval:
+    """两组比例的 DE 区间估计（从原始计数直接构造，供滚动口径复用）。"""
+
+    pgr: Optional[float]
+    plr: Optional[float]
+    de: Optional[float]
+    ci_low: Optional[float]
+    ci_high: Optional[float]
+    p_value: Optional[float]
+    n_boot: int
+    seed: int
+    n_gain_total: int
+    n_loss_total: int
+
+    @property
+    def excludes_zero(self) -> bool:
+        return (
+            self.ci_low is not None
+            and self.ci_high is not None
+            and (self.ci_low > 0 or self.ci_high < 0)
+        )
+
+
+def _boot_de(
+    gain_flags: list[int],
+    loss_flags: list[int],
+    n_boot: int,
+    seed: int,
+    ci_level: float,
+) -> tuple[Optional[float], Optional[float], Optional[float], Optional[float], Optional[float], Optional[float]]:
+    """两组 0/1 标志的有放回重抽样，返回 (pgr, plr, de, ci_low, ci_high, p)。
+
+    这是 PGR/PLR 显著性检验的唯一实现 —— 期末快照口径与逐日滚动口径
+    都走这里，避免两套口径各自实现导致结论不一致。
+    """
+    n_gain, n_loss = len(gain_flags), len(loss_flags)
+    if n_gain <= 0 or n_loss <= 0:
+        return None, None, None, None, None, None
+
+    pgr = sum(gain_flags) / n_gain
+    plr = sum(loss_flags) / n_loss
+
+    rng = random.Random(seed)
+    de_star: list[float] = []
+    for _ in range(n_boot):
+        pgr_star = sum(rng.choice(gain_flags) for _ in range(n_gain)) / n_gain
+        plr_star = sum(rng.choice(loss_flags) for _ in range(n_loss)) / n_loss
+        de_star.append(pgr_star - plr_star)
+    de_star.sort()
+
+    half = (1.0 - ci_level) / 2.0
+    ci_low = _percentile(de_star, half * 100.0)
+    ci_high = _percentile(de_star, (1.0 - half) * 100.0)
+
+    le0 = sum(1 for d in de_star if d <= 0)
+    ge0 = sum(1 for d in de_star if d >= 0)
+    p_boot = min(1.0, max(2.0 * min(le0, ge0) / n_boot, 1.0 / n_boot))
+
+    return pgr, plr, pgr - plr, ci_low, ci_high, p_boot
+
+
+def de_interval(
+    gain_hits: int,
+    gain_total: int,
+    loss_hits: int,
+    loss_total: int,
+    *,
+    n_boot: int = 5000,
+    seed: int = 42,
+    ci_level: float = 0.95,
+) -> DeInterval:
+    """直接由四项计数得到 DE 的区间估计。
+
+    逐日滚动口径天然产出 pooled 计数（Σ已卖 / Σ机会），不需要逐笔原始记录，
+    所以用这个入口；统计核心与 bootstrap_disposition 完全一致。
+    """
+    if gain_total <= 0 or loss_total <= 0:
+        return DeInterval(None, None, None, None, None, None,
+                          n_boot, seed, gain_total, loss_total)
+
+    gain_hits = max(0, min(gain_hits, gain_total))
+    loss_hits = max(0, min(loss_hits, loss_total))
+    gain_flags = [1] * gain_hits + [0] * (gain_total - gain_hits)
+    loss_flags = [1] * loss_hits + [0] * (loss_total - loss_hits)
+
+    pgr, plr, de, ci_low, ci_high, p_boot = _boot_de(
+        gain_flags, loss_flags, n_boot, seed, ci_level
+    )
+    return DeInterval(pgr, plr, de, ci_low, ci_high, p_boot,
+                      n_boot, seed, gain_total, loss_total)
+
+
 def bootstrap_disposition(
     chunks: Iterable[RealizedChunk],
     open_positions: Iterable[OpenPositionMV],
@@ -155,24 +248,12 @@ def bootstrap_disposition(
             "证据不足：样本量过小，不能断言存在处置效应。", notes,
         )
 
-    # ---- bootstrap ----
+    # ---- bootstrap（与 de_interval 共用同一实现，口径不会分叉）----
     gain_flags = [1] * g_sold + [0] * g_held
     loss_flags = [1] * l_sold + [0] * l_held
-    rng = random.Random(seed)
-    de_star: list[float] = []
-    for _ in range(n_boot):
-        pgr_star = sum(rng.choice(gain_flags) for _ in range(n_gain)) / n_gain
-        plr_star = sum(rng.choice(loss_flags) for _ in range(n_loss)) / n_loss
-        de_star.append(pgr_star - plr_star)
-    de_star.sort()
-
-    half = (1.0 - ci_level) / 2.0
-    ci_low = _percentile(de_star, half * 100.0)
-    ci_high = _percentile(de_star, (1.0 - half) * 100.0)
-
-    le0 = sum(1 for d in de_star if d <= 0)
-    ge0 = sum(1 for d in de_star if d >= 0)
-    p_boot = min(1.0, max(2.0 * min(le0, ge0) / n_boot, 1.0 / n_boot))
+    _b_pgr, _b_plr, _b_de, ci_low, ci_high, p_boot = _boot_de(
+        gain_flags, loss_flags, n_boot, seed, ci_level
+    )
 
     p_z = _two_prop_p(pgr, n_gain, plr, n_loss)
 

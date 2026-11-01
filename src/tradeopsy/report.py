@@ -28,6 +28,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from html import escape as _escape
 
+from .analytics.benchmark import BenchmarkReport
 from .analytics.disposition import DispositionReport
 from .analytics.rolling import DailyObs, RollingReport
 from .analytics.significance import SignificanceResult
@@ -566,6 +567,14 @@ p{margin:0 0 10px}
 .curve-down .dot{fill:var(--down)}
 .bar-win{fill:var(--up);opacity:.85}
 .bar-loss{fill:var(--down);opacity:.85}
+/* 同行基准刻度尺：误差棒与文献点必须共享同一条轴，否则读法会变成比大小 */
+.chart .zero-line{stroke:var(--ink3);stroke-width:1.2;stroke-dasharray:3 3}
+.chart .ruler-band{fill:var(--up);opacity:.18}
+.chart .ruler-cap{stroke:var(--up);stroke-width:2.4;stroke-linecap:round}
+.chart .ruler-me{fill:var(--up);stroke:var(--card);stroke-width:2}
+.chart .ruler-peer.in{fill:var(--accent);opacity:.9}
+.chart .ruler-peer.out{fill:var(--ink)}
+.chart .ruler-label{fill:var(--ink2);font-size:14px;font-weight:600}
 .scroll{overflow-x:auto;-webkit-overflow-scrolling:touch}
 .scroll .chart{min-width:520px}
 
@@ -751,6 +760,204 @@ def _rolling_block(roll: RollingReport, rep: DispositionReport) -> list[str]:
     return out
 
 
+def svg_peer_ruler(b: BenchmarkReport, height: int = 190) -> str:
+    """处置效应刻度尺：你的区间 + 文献点估计。
+
+    为什么画成一条轴而不是柱状对比：核心问题不是「谁大谁小」，而是
+    「文献那个点有没有落在我的区间里」。画成柱状会诱导读者比高低，
+    而正确读法是看覆盖关系 —— 所以点必须和误差棒同处一条轴。
+
+    刻意不画"人群分布曲线"：文献只给点估计，没有分布。画一条钟形曲线
+    就是在凭空捏造数据，而且看起来特别可信。
+    """
+    de_comps = [c for c in b.de_comparisons if c.theirs is not None]
+    if not de_comps or b.ci_low is None or b.ci_high is None:
+        return ""
+
+    vals = [b.ci_low, b.ci_high, 0.0] + [c.theirs for c in de_comps]
+    if b.my_de is not None:
+        vals.append(b.my_de)
+
+    lo, hi = min(vals), max(vals)
+    span = hi - lo or 0.10
+    lo -= span * 0.12
+    hi += span * 0.12
+
+    pad_l, pad_r = 40, 40
+    inner = _W - pad_l - pad_r
+
+    def x(v: float) -> float:
+        return pad_l + (v - lo) / (hi - lo) * inner
+
+    mid = height * 0.52
+
+    parts = [f'<svg viewBox="0 0 {_W} {height}" class="chart" role="img" '
+             f'aria-label="处置效应刻度尺：本人的置信区间与文献点估计">']
+
+    # 刻度
+    for t in _ticks(lo, hi, 5):
+        tx = x(t)
+        parts.append(f'<line x1="{tx:.1f}" y1="{mid - 22:.1f}" '
+                     f'x2="{tx:.1f}" y2="{mid + 22:.1f}" class="grid"/>')
+        parts.append(f'<text x="{tx:.1f}" y="{mid + 40:.1f}" '
+                     f'text-anchor="middle" class="axisnote">{t:+.0%}</text>')
+
+    # 数轴
+    parts.append(f'<line x1="{pad_l}" y1="{mid:.1f}" x2="{_W - pad_r}" '
+                 f'y2="{mid:.1f}" class="grid"/>')
+    # 零轴强调
+    zx = x(0.0)
+    parts.append(f'<line x1="{zx:.1f}" y1="{mid - 34:.1f}" x2="{zx:.1f}" '
+                 f'y2="{mid + 30:.1f}" class="zero-line"/>')
+
+    # 我的区间：横条 + 端帽
+    x1, x2 = x(b.ci_low), x(b.ci_high)
+    parts.append(f'<rect x="{x1:.1f}" y="{mid - 13:.1f}" width="{max(2.0, x2 - x1):.1f}" '
+                 f'height="26" rx="4" class="ruler-band"/>')
+    for xx in (x1, x2):
+        parts.append(f'<line x1="{xx:.1f}" y1="{mid - 22:.1f}" x2="{xx:.1f}" '
+                     f'y2="{mid + 22:.1f}" class="ruler-cap"/>')
+
+    # 我的点估计
+    if b.my_de is not None:
+        parts.append(f'<circle cx="{x(b.my_de):.1f}" cy="{mid}" r="7" '
+                     f'class="ruler-me"/>')
+        parts.append(f'<text x="{x(b.my_de):.1f}" y="{mid - 26:.1f}" '
+                     f'text-anchor="middle" class="ruler-label">你 {b.my_de:+.1%}</text>')
+
+    # 文献点：菱形。落在区间内 / 外给不同样式，一眼能看出覆盖关系
+    for i, c in enumerate(de_comps):
+        cx = x(c.theirs)
+        inside = b.ci_low <= c.theirs <= b.ci_high
+        cls = "ruler-peer in" if inside else "ruler-peer out"
+        dy = mid + 64 + i * 20
+        cy = mid
+        parts.append(
+            f'<polygon points="{cx:.1f},{cy - 8:.1f} {cx + 8:.1f},{cy:.1f} '
+            f'{cx:.1f},{cy + 8:.1f} {cx - 8:.1f},{cy:.1f}" class="{cls}"/>'
+        )
+        parts.append(f'<text x="{cx:.1f}" y="{dy:.1f}" text-anchor="middle" '
+                     f'class="ruler-label">{_esc(c.bench.short_market)} '
+                     f'{c.theirs:+.1%}</text>')
+
+    # 图例
+    parts.append(f'<text x="{pad_l}" y="16" class="axisnote">'
+                 f'横轴：PGR − PLR（百分点）· 区间越宽＝样本越少</text>')
+    parts.append("</svg>")
+    return "".join(parts)
+
+
+def _peer_block(b: BenchmarkReport) -> list[str]:
+    """同行基准区块。"""
+    if not b.comparable:
+        return [
+            '<section class="block">',
+            "<h2>同行基准：这次不做对照</h2>",
+            f'<p class="note">{_esc(b.blocked_reason or "")}</p>',
+            "</section>",
+        ]
+
+    out = ['<section class="block">', "<h2>同行基准：你在哪个量级</h2>"]
+
+    out.append(
+        '<p class="note">两条轴上的点来自已发表研究，是<b>群体点估计</b>；'
+        "红色横条是<b>你自己的 95% 置信区间</b>。正确的读法是看"
+        "「文献那个点有没有落进你的条里」，而不是比谁高谁低。</p>"
+    )
+
+    ruler = svg_peer_ruler(b)
+    if ruler:
+        out.append(f'<div class="scroll">{ruler}</div>')
+
+    # 逐条对照
+    rows: list[list[str]] = []
+    for c in b.de_comparisons:
+        bench = c.bench
+        rows.append([
+            _esc(bench.short_market),
+            _esc(bench.sample_size),
+            f'{bench.pgr:.1%} / {bench.plr:.1%}',
+            f"{bench.de * 100:+.1f}pp",
+            f"{c.mine * 100:+.1f}pp" if c.mine is not None else "—",
+            _esc(_VERDICT_CN.get(c.verdict, c.verdict)),
+        ])
+    if rows:
+        out.append(_table(
+            ["人群", "样本", "PGR / PLR", "文献 DE", "你的 DE", "判读"],
+            rows, tone_col=3,
+        ))
+
+    # 比值口径：只说量级，不算显著
+    ratio_rows: list[list[str]] = []
+    for c in b.ratio_comparisons:
+        ratio_rows.append([
+            _esc(c.bench.short_market),
+            f"{c.bench.ratio:.2f}",
+            f"{c.mine:.2f}" if c.mine is not None else "—",
+            _esc(_VERDICT_CN.get(c.verdict, c.verdict)),
+        ])
+    if ratio_rows:
+        out.append(_details(
+            "比值口径（PGR/PLR）对照 —— 为什么只列不用它做检验",
+            _table(["人群", "文献比值", "你的比值", "判读"], ratio_rows)
+            + '<p class="note">比值 = PGR ÷ PLR，分母是 PLR。当 PLR 很小时'
+            "（几十次机会里只割过一两次肉），比值会对个别交易极度敏感，"
+            "同一个账户换个样本期就能从 2 跳到 8。所以它只适合看量级，"
+            "不适合做显著性检验 —— 判断用上面的 DE 差值口径。</p>",
+        ))
+
+    if b.notes:
+        out.append('<p class="note">' + "<br>".join(_esc(n) for n in b.notes) + "</p>")
+
+    # 核查记录：撤下的错误基准，主动交代
+    retracted = (b.meta or {}).get("retracted", [])
+    if retracted:
+        items = []
+        for r in retracted:
+            items.append(
+                f'<p class="note"><b>已撤下：{_esc(r.get("market", ""))} '
+                f'{_esc(r.get("claimed", ""))}</b>'
+                f'（原标注来源：{_esc(r.get("attributed_to", ""))}）<br>'
+                f'{_esc(r.get("why", ""))}<br>'
+                f'核查依据：{_esc(r.get("evidence", ""))}</p>'
+            )
+        out.append(_details(
+            "核查记录：这两条基准被撤下了",
+            "".join(items)
+            + '<p class="note">这两条曾出现在本项目早期的路线图里，来自二手文章。'
+            "回原文核对时发现原文根本没报告这个数字。留在这里是为了下次"
+            "不要又被同一个错误抄回去。</p>",
+        ))
+
+    if b.ci_width is not None and b.power_ratio is not None:
+        out.append(
+            f'<p class="note">你的区间宽度 <b>{b.ci_width:.1%}</b>，'
+            f"是文献效应量（{_peer_ref_de(b):.1%}）的 "
+            f"<b>{b.power_ratio:.0f} 倍</b> —— 这个比值就是这套对照的"
+            "分辨力上限。</p>"
+        )
+
+    out.append("</section>")
+    return out
+
+
+_VERDICT_CN = {
+    "indistinguishable": "落在区间内（样本不足以分辨）",
+    "weaker": "你的更弱",
+    "stronger": "你的更强",
+    "unstable": "比值不稳定",
+    "descriptive": "仅量级参照",
+    "unavailable": "无法计算",
+}
+
+
+def _peer_ref_de(b: BenchmarkReport) -> float:
+    for c in b.de_comparisons:
+        if c.theirs:
+            return c.theirs
+    return 0.05
+
+
 def build_report(
     ds: Dataset,
     *,
@@ -914,6 +1121,14 @@ def build_report(
 
     # --- 逐日滚动口径（提供逐日价格序列时才出现）
     roll_block = _rolling_block(roll, rep) if roll is not None else []
+
+    # --- 同行基准对照（只有滚动口径才与文献同构；算不出来就整块不出现，
+    #     避免报告里多一个"数据不足"的空板块制造噪音）
+    peer_block: list[str] = []
+    if roll is not None:
+        _peer = ds.benchmark(roll)
+        if _peer.comparable:
+            peer_block = _peer_block(_peer)
 
     # --- 收益曲线
     curve = equity_curve(chunks)
@@ -1111,7 +1326,8 @@ def build_report(
         f"<title>{_esc(title)} · tradeopsy</title>"
         f"<style>{_CSS}</style></head><body><main>"
         + "".join(head) + "".join(verdict) + "".join(kpis)
-        + "".join(disp_block) + "".join(roll_block) + "".join(curve_block) + "".join(bins_block)
+        + "".join(disp_block) + "".join(roll_block) + "".join(peer_block)
+        + "".join(curve_block) + "".join(bins_block)
         + "".join(bench_block) + "".join(detail) + "".join(footer)
         + "</main></body></html>"
     )

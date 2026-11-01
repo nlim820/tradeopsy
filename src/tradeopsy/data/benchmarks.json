@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "updated": "2026-11-01",
+  "caliber_note": "本文件的每一条基准都采用「每个卖出日的计数口径」（Odean 1998 原文方法）。因此只能与 tradeopsy 的 --price-history 逐日滚动口径对照，不能与期末快照口径对照 —— 后者的分母只有「今天还没卖的」，与文献分母不是同一个东西。",
+  "benchmarks": [
+    {
+      "id": "odean1998_us",
+      "market": "美国散户（折扣券商）",
+      "source": "Odean, T. (1998). Are Investors Reluctant to Realize Their Losses? Journal of Finance, 53(5), 1775-1798.",
+      "sample_period": "1987-01 至 1993-12",
+      "sample_size": "10,000 个账户",
+      "pgr": 0.148,
+      "plr": 0.098,
+      "de": 0.05,
+      "ratio": 1.51,
+      "quote": "I test the disposition effect ... by analyzing trading records for 10,000 accounts at a large discount brokerage house. ... Odean (1998) reports PGR = 0.148 and PLR = 0.098.",
+      "verified": true,
+      "verified_note": "样本量与设计取自原文摘要；PGR/PLR 数值经四份独立学术文献交叉一致（DellaVigna《Psychology and Economics》综述、Barberis & Xiong NBER 工作论文、Frydman et al. PMC 论文、Barberis 个人主页论文稿）—— 均为逐字引用 0.148 / 0.098。",
+      "caveat": "原文另有一处「账户层面」检验（各账户 PGR/PLR 取平均），数值与本条的组合层面口径不同，不可混用；本工具只采用组合层面的 0.148/0.098。",
+      "ratio_note": "兑现盈利的可能性比兑现亏损高约 51%"
+    },
+    {
+      "id": "wujiawei2020_cn",
+      "market": "中国 A 股散户",
+      "source": "武佳薇, 汪昌云, 陈紫琳, Jie Michael Guo (2020). 中国个人投资者处置效应研究——一个非理性信念的视角. 金融研究, 2020(2), 147-166.",
+      "sample_period": "2007–2009，含一轮完整牛熊",
+      "sample_size": "约 177 万个个人投资者账户",
+      "pgr": null,
+      "plr": null,
+      "de": null,
+      "ratio": 1.2,
+      "quote": "On average, the likelihood of a sale for Chinese stock investors is 20% higher when a gain is realized than when a loss is realized.",
+      "verified": true,
+      "verified_note": "取自《金融研究》官网（jryj.org.cn）该文英文摘要，逐字引用。",
+      "caveat": "原文只报告「卖出获利股的可能性比亏损股高 20%」这一比值口径，未给出 PGR/PLR 的绝对水平，因此 DE（百分点差）无法换算 —— 换算需要 PLR 的绝对水平，而它没有公布。本工具对该条只做比值对照，不参与 DE 区间检验。",
+      "ratio_note": "原文：兑现盈利的可能性比兑现亏损高约 20%"
+    }
+  ],
+  "retracted": [
+    {
+      "market": "芬兰散户",
+      "claimed": "PGR/PLR = 1.51",
+      "attributed_to": "Grinblatt & Keloharju (2001), What Makes Investors Trade?, Journal of Finance 56(2)",
+      "why": "该文用的是 logit 回归（因变量为「卖出 vs 纸面卖出」），报告的是「极端资本亏损使卖出概率降低 32%、中度亏损降低 21%」这类系数，通篇没有 PGR/PLR 比率。1.51 实为 Odean (1998) 自身的比值，被二手文章误挂到该研究名下。",
+      "evidence": "Aalto 大学公开的论文 PDF（what_makes_investors_trade.pdf）摘要与正文方法节"
+    },
+    {
+      "market": "中国 A 股",
+      "claimed": "PGR/PLR = 1.64",
+      "attributed_to": "Feng & Seasholes (2005), Do Investor Sophistication and Trading Experience Eliminate Behavioral Biases in Financial Markets?, Review of Finance 9(3)",
+      "why": "该文用 Cox 比例风险模型估计卖出倾向，同样不报告 PGR/PLR 比率。1.64 查无出处 —— 常见中文二手文献直接引用而未核原文。",
+      "evidence": "Review of Finance 9(3):305-351 摘要（SSRN / RePEc 均一致，全文无该表）"
+    }
+  ],
+  "quantile_stance": {
+    "supported": false,
+    "why": "分位数（「你在第 X 百分位」）需要个体层面的横截面分布，即每个账户各自的 PGR/PLR 及其分布形态。已核实的文献只公布群体点估计（组合层面汇总值），既无标准差也无分位点。缺失分布时，任何百分位都必须假设分布形态 —— 而 PGR/PLR 取值有界于 [0,1] 且明显右偏，套用正态假设会得到看似精确的假数字。",
+    "alternative": "改用区间包含检验：把文献的点估计与本人 DE 的 bootstrap 置信区间比对，判断「文献值是否落在我的区间内」。这能回答「我和那个人群有没有可分辨的差异」，但不能回答「我排在人群的第几位」。",
+    "power_warning": "该检验统计功效极低：文献动辄上万账户，个人账户可能只有几十个卖出日，置信区间宽度常是文献效应量的数倍。因此「区间内」几乎必然出现，含义是「样本不足以分辨」，而不是「我和人群一样」。"
+  }
+}

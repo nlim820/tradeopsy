@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import re
 import sys
 import unicodedata
 from collections import defaultdict
@@ -19,6 +20,7 @@ from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
+from .analytics.benchmark import BenchmarkReport, Comparison
 from .analytics.disposition import (
     DispositionReport,
     compute_disposition,
@@ -186,6 +188,134 @@ def _render_rolling(roll: RollingReport, rep: DispositionReport | None = None) -
     for n in roll.notes:
         lines.append(f"   · {n}")
     return "\n".join(lines)
+
+
+def _render_benchmark(b: BenchmarkReport) -> str:
+    """同行基准板块。
+
+    刻意不叫"分位数"/"排名" —— 文献只给群体点估计，没有个体分布，
+    算不出百分位。这里做的是区间包含检验：文献值是否落在你的置信区间内。
+    """
+    lines = ["", "【同行基准 · 点估计区间对照】"]
+
+    if not b.comparable:
+        lines.append("  不做对照 —— 这不是缺功能，是口径不可比。")
+        for seg in _wrap(b.blocked_reason or "", 66):
+            lines.append(f"   {seg}")
+        return "\n".join(lines)
+
+    # 同一条基准可能同时提供 DE 与比值两种口径，按基准合并成一块
+    order: list[str] = []
+    grouped: dict[str, list[Comparison]] = {}
+    for c in b.comparisons:
+        if c.bench.id not in grouped:
+            grouped[c.bench.id] = []
+            order.append(c.bench.id)
+        grouped[c.bench.id].append(c)
+
+    for bid in order:
+        items = grouped[bid]
+        bench = items[0].bench
+        lines.append("")
+        lines.append(f"  {bench.market}")
+        lines.append(f"    出处：{bench.source}")
+        lines.append(f"    样本：{bench.sample_size}（{bench.sample_period}）")
+
+        for c in items:
+            if c.metric == "de":
+                lines.append(
+                    f"    文献 PGR {bench.pgr:.1%} / PLR {bench.plr:.1%}"
+                    f"  →  DE {bench.de * 100:+.1f} 个百分点"
+                )
+                mine = "—" if c.mine is None else f"{c.mine * 100:+.1f} 个百分点"
+                ci = ""
+                if b.ci_low is not None and b.ci_high is not None:
+                    ci = (f"（95% 区间 {b.ci_low * 100:+.1f} ~ "
+                          f"{b.ci_high * 100:+.1f} 个百分点）")
+                lines.append(f"    你的 DE {mine}{ci}")
+            else:
+                note = f"（{bench.ratio_note}）" if bench.ratio_note else ""
+                lines.append(f"    文献 PGR/PLR ≈ {bench.ratio:.2f}{note}")
+                mine = "—" if c.mine is None else f"{c.mine:.2f}"
+                lines.append(f"    你的 PGR/PLR {mine}（比值口径，未做显著性）")
+
+            for i, seg in enumerate(_wrap(c.text, 62)):
+                lines.append(f"    {'→ ' if i == 0 else '  '}{seg}")
+
+        if bench.caveat:
+            for seg in _wrap("口径提醒：" + bench.caveat, 64):
+                lines.append(f"      {seg}")
+
+    if b.notes:
+        lines.append("")
+    for n in b.notes:
+        for i, seg in enumerate(_wrap(n, 66)):
+            lines.append(f"  {'⚠ ' if i == 0 else '  '}{seg}")
+
+    return "\n".join(lines)
+
+
+#: 折行切分：ASCII 词（带常见标点）｜空白串｜其余任意单字符。
+#: 第三支是兜底 —— 少了它，破折号、方括号、波浪线会被 findall 静默丢弃，
+#: 把「[0,1]」变成「0,1」这种内容损坏，而且看不出来。
+_WRAP_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9.,%/\-_:]*|\s+|.", re.S)
+#: 优先在这些字符之后断行，避免把「极敏感」拆成「极敏 / 感」
+_BREAK_CHARS = set("，。、；：！？）】」』—…%,;:)]·")
+
+
+def _disp_w(s: str) -> int:
+    return sum(2 if unicodedata.east_asian_width(c) in ("W", "F") else 1 for c in s)
+
+
+def _wrap(text: str, width: int) -> list[str]:
+    """按显示宽度折行（中文按 2 列算），优先在标点或空格处断开。
+
+    不能逐字符切：那样会把 0.148 切成 "0." + "148"，把 Odean 切成两截。
+    也不能只在超宽处切：中文没有词边界，会切出「极敏 / 感」这种断词。
+    做法是记住最近一个可断点，超宽时回退到那里。
+    """
+    out: list[str] = []
+    cur = ""
+    cur_w = 0
+    break_at = -1          # cur 中最近的可断位置
+    break_w = 0            # 断点之前的显示宽度
+
+    for tok in _WRAP_TOKEN.findall(text):
+        tok_w = 2 if unicodedata.east_asian_width(tok[0]) in ("W", "F") else len(tok)
+
+        if cur and cur_w + tok_w > width:
+            if 0 < break_at < len(cur):
+                out.append(cur[:break_at].rstrip())
+                cur = cur[break_at:]
+                cur_w -= break_w
+            else:
+                out.append(cur.rstrip())
+                cur, cur_w = "", 0
+            break_at, break_w = -1, 0
+
+            # 避头尾：中文标点不该出现在行首，挪回上一行末尾
+            while cur and cur[0] in _BREAK_CHARS and out:
+                out[-1] += cur[0]
+                cur = cur[1:]
+                cur_w -= 1
+
+        if not cur and not tok.strip():
+            continue        # 行首不留空白
+
+        # 避头尾（补漏）：断点恰好落在行尾时，紧随的标点会掉到下一行开头，
+        # 这里直接并回上一行末尾。
+        if not cur and out and tok in _BREAK_CHARS:
+            out[-1] += tok
+            continue
+
+        cur += tok
+        cur_w += tok_w
+        if tok in _BREAK_CHARS or tok.isspace():
+            break_at, break_w = len(cur), cur_w
+
+    if cur.strip():
+        out.append(cur.rstrip())
+    return out or [""]
 
 
 def _compare_verdict(snap: float, rolling_de: float) -> str:
@@ -451,6 +581,8 @@ def main(argv: list[str] | None = None) -> int:
                       report, ds.file_metas, ds.calendar)
     if roll is not None:
         out_text += "\n" + _render_rolling(roll, report)
+        # 基准对照只能在滚动口径下做（见 analytics/benchmark.py 的口径约束）
+        out_text += "\n" + _render_benchmark(ds.benchmark(roll))
     if sig is not None:
         out_text += "\n" + _render_significance(sig)
     print(out_text)

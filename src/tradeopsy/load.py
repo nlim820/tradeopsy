@@ -19,6 +19,7 @@ from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
+from .analytics.benchmark import BenchmarkReport, compare_to_benchmarks
 from .analytics.disposition import (
     DispositionReport,
     OpenPositionMV,
@@ -26,7 +27,11 @@ from .analytics.disposition import (
     open_positions_from_ledger,
 )
 from .analytics.rolling import RollingReport, rolling_disposition
-from .analytics.significance import SignificanceResult, bootstrap_disposition
+from .analytics.significance import (
+    SignificanceResult,
+    bootstrap_disposition,
+    de_interval,
+)
 from .ledger import PositionLedger, summarize, timeline
 from .model import Event
 from .parsers import parse_file
@@ -220,6 +225,32 @@ class Dataset:
             price_history,
             trading_calendar=self.calendar,
             max_stale_days=max_stale_days,
+        )
+
+    def benchmark(self, roll: RollingReport | None) -> BenchmarkReport:
+        """同行基准对照。
+
+        只有逐日滚动口径与已发表文献同构（都是「每个卖出日」计数口径），
+        所以这里由 roll 的成败决定能否对照 —— 期末快照口径一律拒绝，
+        理由见 analytics/benchmark.py 的模块文档。
+        """
+        if roll is None:
+            return compare_to_benchmarks(caliber="none")
+        if roll.mode != "rolling":
+            return compare_to_benchmarks(caliber="insufficient")
+
+        # 复用同一套 bootstrap 核心，区间与 DE 来自同一批计数
+        interval = de_interval(
+            roll.n_gain_sold, roll.n_gain_opp, roll.n_loss_sold, roll.n_loss_opp
+        )
+        return compare_to_benchmarks(
+            caliber="rolling",
+            my_de=roll.de,
+            ci_low=interval.ci_low,
+            ci_high=interval.ci_high,
+            my_pgr=roll.pgr,
+            my_plr=roll.plr,
+            my_n_obs=roll.n_obs,
         )
 
 
