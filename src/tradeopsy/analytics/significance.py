@@ -15,7 +15,8 @@
     1. 把每个"机会"抽象成一个 0/1 观察：
          gain 机会：卖掉了(1) / 还拿着(0)
          loss 机会：割肉了(1) / 还扛着(0)
-    2. PGR = mean(gain flags)，PLR = mean(loss flags)，DE = PLR - PGR
+    2. PGR = mean(gain flags)，PLR = mean(loss flags)，DE = PGR - PLR
+       （Odean 口径：DE 为 PGR 减 PLR，正值表示处置效应）
     3. bootstrap：对 gain、loss 两组各自有放回重抽样，重算 DE，得到分布
        -> 95% 百分位置信区间 + 符号检验 p 值
     4. 双比例 z 检验作为经典方法的交叉验证（近似，不严格独立）
@@ -129,7 +130,7 @@ def bootstrap_disposition(
 
     pgr = g_sold / n_gain if n_gain > 0 else None
     plr = l_sold / n_loss if n_loss > 0 else None
-    de = (plr - pgr) if (pgr is not None and plr is not None) else None
+    de = (pgr - plr) if (pgr is not None and plr is not None) else None
 
     notes: list[str] = []
 
@@ -160,9 +161,9 @@ def bootstrap_disposition(
     rng = random.Random(seed)
     de_star: list[float] = []
     for _ in range(n_boot):
-        pg = sum(rng.choice(gain_flags) for _ in range(n_gain)) / n_gain
-        pl = sum(rng.choice(loss_flags) for _ in range(n_loss)) / n_loss
-        de_star.append(pl - pg)
+        pgr_star = sum(rng.choice(gain_flags) for _ in range(n_gain)) / n_gain
+        plr_star = sum(rng.choice(loss_flags) for _ in range(n_loss)) / n_loss
+        de_star.append(pgr_star - plr_star)
     de_star.sort()
 
     half = (1.0 - ci_level) / 2.0

@@ -179,7 +179,8 @@ def _render_significance(sig: SignificanceResult) -> str:
 
 
 def render(paths: list[Path], result, ledger: PositionLedger, dup: int, limit: int,
-           report: DispositionReport | None = None) -> str:
+           report: DispositionReport | None = None,
+           file_metas: list[tuple[str, dict]] | None = None) -> str:
     lines: list[str] = []
     bar = "=" * 70
 
@@ -188,19 +189,25 @@ def render(paths: list[Path], result, ledger: PositionLedger, dup: int, limit: i
     lines.append(bar)
 
     lines.append("\n【文件】")
-    for p in paths:
-        lines.append(f"  {p.name}")
-    m = result.meta
-    if "encoding" in m:
-        lines.append(
-            f"  编码 {m.get('encoding')} · 分隔符 {m.get('delimiter')!r} · "
-            f"表头第 {m.get('header_row')} 行 · 共 {m.get('total_rows')} 行"
-        )
-        cols = m.get("columns") or {}
-        mapped = " / ".join(f"{k}={v}" for k, v in cols.items() if v)
-        lines.append(f"  列映射 {mapped}")
-        if m.get("fee_split_columns"):
-            lines.append(f"  费用分项列 {m['fee_split_columns']}（已累加）")
+    # 逐文件展示元信息。多份文件来自不同券商/不同年份时，编码、表头位置、
+    # 费用列形态都可能不同 —— 只显示第一份会让人误以为"所有文件的解析方式一样"，
+    # 而这恰恰是排障时最需要看清的东西。
+    if file_metas:
+        for name, m in file_metas:
+            head = f"  {name}"
+            if m.get("encoding"):
+                head += (f" · {m['encoding']} · 表头第 {m.get('header_row')} 行"
+                         f" · {m.get('total_rows')} 行")
+            lines.append(head)
+            cols = m.get("columns") or {}
+            mapped = " / ".join(f"{k}={v}" for k, v in cols.items() if v)
+            if mapped:
+                lines.append(f"     列映射 {mapped}")
+            if m.get("fee_split_columns"):
+                lines.append(f"     费用分项列 {m['fee_split_columns']}（已累加）")
+    else:
+        for p in paths:
+            lines.append(f"  {p.name}")
     if dup:
         lines.append(f"  跨文件去重 {dup} 条重复记录")
 
@@ -325,21 +332,20 @@ def main(argv: list[str] | None = None) -> int:
 
     all_events = []
     warnings_all = []
-    meta: dict = {}
+    file_metas: list[tuple[str, dict]] = []
     for p in paths:
         r = parse_file(p)
         all_events.extend(r.events)
         warnings_all.extend(r.warnings)
-        if not meta:
-            meta = r.meta
+        file_metas.append((p.name, dict(r.meta)))
 
     from .parsers.base import ParseResult
-    merged = ParseResult(events=all_events, warnings=warnings_all, meta=meta)
+    merged = ParseResult(events=all_events, warnings=warnings_all)
     events, dup = _dedupe(merged.events)
     merged.events = events
 
     if not events:
-        print(render(paths, merged, PositionLedger(), dup, 0))
+        print(render(paths, merged, PositionLedger(), dup, 0, None, file_metas))
         print("解析成功 0 条事件。请检查上面的【文件】信息与【告警】。", file=sys.stderr)
         return 1
 
@@ -355,12 +361,12 @@ def main(argv: list[str] | None = None) -> int:
         if prices is not None:
             sig = bootstrap_disposition(ledger.chunks, opens)
 
-    out_text = render(paths, merged, ledger, dup, args.limit, report)
+    out_text = render(paths, merged, ledger, dup, args.limit, report, file_metas)
     if sig is not None:
         out_text += "\n" + _render_significance(sig)
     print(out_text)
     if args.out:
-        Path(args.out).write_text(report, encoding="utf-8")
+        Path(args.out).write_text(out_text, encoding="utf-8")
         print(f"报告已写入 {args.out}")
     return 0
 

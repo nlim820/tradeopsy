@@ -3,7 +3,7 @@
 预期值全部按 Odean (1998) 口径手算：
     PGR = RG / (RG + PG)
     PLR = RL / (RL + PL)
-    DE  = PLR - PGR
+    DE  = PGR - PLR      （正值 = 处置效应：卖盈持亏）
 
 不依赖任何真实交割单，也不联网。对不上就是 bug。
 """
@@ -90,7 +90,12 @@ class TestDispositionNoEffect(unittest.TestCase):
 
 
 class TestDispositionStrongEffect(unittest.TestCase):
-    """明显处置效应：PGR 低、PLR 高，DE > 0.10。"""
+    """明显处置效应：卖盈持亏 -> PGR 高、PLR 低 -> DE > 0.10。
+
+    rg=1000, pg=200   -> PGR = 1000/1200 = 0.833333
+    rl=200,  pl=2000  -> PLR = 200/2200  = 0.090909
+    DE = 0.742424 > 0.10，应判"明显处置效应"。
+    """
 
     def setUp(self) -> None:
         self.chunks = [
@@ -98,19 +103,49 @@ class TestDispositionStrongEffect(unittest.TestCase):
             chunk("C", date(2026, 2, 1), date(2026, 4, 1), "1000.00", "-200.00"),   # rl -200
         ]
         self.opens = [
-            mv("B", "1000.00", "4000.00"),   # pg +3000 -> PGR = 1000/4000 = 0.25
-            mv("D", "1000.00", "800.00"),     # pl +200  -> PLR = 200/400 = 0.5
+            mv("B", "1000.00", "1200.00"),    # pg +200
+            mv("D", "3000.00", "1000.00"),    # pl +2000
         ]
 
     def test_pgr_plr_and_effect(self):
         r = compute_disposition(self.chunks, self.opens)
-        self.assertAlmostEqual(r.pgr, 0.25, places=6)
-        self.assertAlmostEqual(r.plr, 0.5, places=6)
-        self.assertAlmostEqual(r.disposition_effect, 0.25, places=6)
+        self.assertAlmostEqual(r.pgr, 1000 / 1200, places=6)
+        self.assertAlmostEqual(r.plr, 200 / 2200, places=6)
+        self.assertAlmostEqual(r.disposition_effect, 1000 / 1200 - 200 / 2200, places=6)
+        self.assertGreater(r.disposition_effect, 0.0)
 
     def test_verdict_strong(self):
         r = compute_disposition(self.chunks, self.opens)
         self.assertIn("明显处置效应", r.verdict)
+
+
+class TestReverseDisposition(unittest.TestCase):
+    """反向：割肉快、赚钱拿得住 -> PGR 低、PLR 高 -> DE < -0.10。
+
+    rg=1000, pg=3000  -> PGR = 1000/4000 = 0.25
+    rl=200,  pl=200   -> PLR = 200/400   = 0.50
+    DE = 0.25 - 0.50 = -0.25，应判"反向处置效应"。
+    """
+
+    def setUp(self) -> None:
+        self.chunks = [
+            chunk("A", date(2026, 1, 5), date(2026, 3, 5), "1000.00", "1000.00"),
+            chunk("C", date(2026, 2, 1), date(2026, 4, 1), "1000.00", "-200.00"),
+        ]
+        self.opens = [
+            mv("B", "1000.00", "4000.00"),   # pg +3000
+            mv("D", "1000.00", "800.00"),    # pl +200
+        ]
+
+    def test_effect_negative(self):
+        r = compute_disposition(self.chunks, self.opens)
+        self.assertAlmostEqual(r.pgr, 0.25, places=6)
+        self.assertAlmostEqual(r.plr, 0.5, places=6)
+        self.assertAlmostEqual(r.disposition_effect, -0.25, places=6)
+
+    def test_verdict_reverse(self):
+        r = compute_disposition(self.chunks, self.opens)
+        self.assertIn("反向处置效应", r.verdict)
 
 
 class TestRealizedOnly(unittest.TestCase):

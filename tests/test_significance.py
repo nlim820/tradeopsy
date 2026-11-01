@@ -62,7 +62,7 @@ class TestCounts(unittest.TestCase):
         self.assertEqual(r.n_loss_held, 1)
         self.assertAlmostEqual(r.pgr_count, 0.75)   # 3 / 4
         self.assertAlmostEqual(r.plr_count, 0.5)    # 1 / 2
-        self.assertAlmostEqual(r.de_count, -0.25)   # 0.5 - 0.75
+        self.assertAlmostEqual(r.de_count, 0.25)    # 0.75 - 0.50（Odean 口径 PGR-PLR）
 
 
 class TestInsufficient(unittest.TestCase):
@@ -85,20 +85,20 @@ class TestInsufficient(unittest.TestCase):
 
 
 class TestSignificant(unittest.TestCase):
-    """构造清晰的处置效应：PGR=0.45、PLR=0.80，样本足够大。"""
+    """构造清晰的处置效应：卖盈持亏 -> PGR=0.80 > PLR=0.45，DE=+0.35，样本足够大。"""
 
     def setUp(self) -> None:
-        self.chunks = [gain(f"G{i}") for i in range(18)] + [loss(f"L{i}") for i in range(32)]
-        self.opens = [pg(f"PG{i}") for i in range(22)] + [pl(f"PL{i}") for i in range(8)]
+        self.chunks = [gain(f"G{i}") for i in range(32)] + [loss(f"L{i}") for i in range(18)]
+        self.opens = [pg(f"PG{i}") for i in range(8)] + [pl(f"PL{i}") for i in range(22)]
 
     def test_counts(self):
         r = bootstrap_disposition(self.chunks, self.opens, n_boot=1000, seed=7)
-        self.assertEqual(r.n_gain_sold, 18)
-        self.assertEqual(r.n_gain_held, 22)
-        self.assertEqual(r.n_loss_sold, 32)
-        self.assertEqual(r.n_loss_held, 8)
-        self.assertAlmostEqual(r.pgr_count, 18 / 40)
-        self.assertAlmostEqual(r.plr_count, 32 / 40)
+        self.assertEqual(r.n_gain_sold, 32)
+        self.assertEqual(r.n_gain_held, 8)
+        self.assertEqual(r.n_loss_sold, 18)
+        self.assertEqual(r.n_loss_held, 22)
+        self.assertAlmostEqual(r.pgr_count, 32 / 40)
+        self.assertAlmostEqual(r.plr_count, 18 / 40)
         self.assertAlmostEqual(r.de_count, 0.35)
 
     def test_significant(self):
@@ -116,8 +116,8 @@ class TestSignificant(unittest.TestCase):
 
 class TestReproducible(unittest.TestCase):
     def test_same_seed_same_ci(self):
-        chunks = [gain(f"G{i}") for i in range(18)] + [loss(f"L{i}") for i in range(32)]
-        opens = [pg(f"PG{i}") for i in range(22)] + [pl(f"PL{i}") for i in range(8)]
+        chunks = [gain(f"G{i}") for i in range(32)] + [loss(f"L{i}") for i in range(18)]
+        opens = [pg(f"PG{i}") for i in range(8)] + [pl(f"PL{i}") for i in range(22)]
         a = bootstrap_disposition(chunks, opens, n_boot=500, seed=123)
         b = bootstrap_disposition(chunks, opens, n_boot=500, seed=123)
         self.assertEqual(a.ci_low, b.ci_low)

@@ -18,17 +18,27 @@
 - **FIFO 配对引擎**（Decimal 记账，黄金样本测试）
 - **CSV 解析层**（编码/表头/列名自动适配）
 - **命令行体检报告**（`tradeopsy analyze`，逐笔已实现 + 按标的归因）
-- **处置效应引擎 PGR/PLR**（严格 Odean 1998 口径 + A 股持有期本土化，58 个测试全绿）
+- **处置效应引擎 PGR/PLR**（严格 Odean 1998 口径 + A 股持有期本土化）
 - **显著性检验**（计数口径 bootstrap 置信区间 + 双比例 z 检验，小样本自动判"证据不足"）
+- **示例账户数据集**（12 个月 / 两种券商格式 / 含送转配股分红可转债，可复现可测试）
 - **纸面账户日更管道**（每个交易日自动撮合、记账、出净值，跑在 GitHub Actions 上）
+
+**74 个测试全绿。**
 
 一条命令看效果（离线、不联网）：
 
 ```bash
+# 完整体检报告：两种券商格式 + 送转/配股/分红/可转债 + 处置效应 + 显著性
+PYTHONPATH=src python -m tradeopsy analyze examples/sample_account \
+    --prices examples/sample_account_prices.csv
+
 python examples/disposition_demo.py          # 处置效应体检卡 + 显著性（Wrapped 风格）
 python examples/disposition_demo.py --large  # 大样本教学：看显著性如何被检出
-tradeopsy analyze fixtures                   # 完整体检报告（含行为归因板块）
+PYTHONPATH=src python -m tradeopsy analyze fixtures   # 最小黄金样本
 ```
+
+不想放真实交割单也能看到完整效果 —— 上面第一条用的是仓库自带的
+[示例账户](examples/sample_account/README.md)（合成数据，覆盖 10 类真实脏数据场景）。
 
 还没有的：HTML 可视化报告、同行基准。进度见 [ROADMAP.md](ROADMAP.md)。
 
@@ -219,7 +229,7 @@ GitHub 的提交历史不可撤回 —— 事后删文件也没用。所以 `pri
 
 ## 路线图
 
-见 [ROADMAP.md](ROADMAP.md)。当前在 **P2（处置效应指标已落地 v1）**：引擎、黄金样本、演示卡均可用；下一步是显著性检验与 HTML 报告。
+见 [ROADMAP.md](ROADMAP.md)。当前在 **P2（处置效应 + 显著性检验已落地）**：引擎、黄金样本、示例账户、演示卡均可用；下一步是 P3 的 HTML 可视化报告与同行基准。
 
 ## License
 

@@ -9,8 +9,14 @@
 学术口径（Odean 1998）：
     PGR = 已实现盈利 / (已实现盈利 + 账面盈利)
     PLR = 已实现亏损 / (已实现亏损 + 账面亏损)
-    disposition effect = PLR - PGR
+    disposition effect DE = PGR - PLR
     若 > 0，说明你更倾向于"落袋盈利、持有亏损" —— 典型的处置效应。
+
+    符号的推导（务必别记反）：
+        "落袋盈利" => 盈利机会里被兑现的比例高 => PGR 趋近 1
+        "持有亏损" => 亏损机会里被兑现的比例低 => PLR 趋近 0
+        两者同时成立时 PGR - PLR > 0，所以 DE 必须是 PGR 减 PLR。
+        Odean 原始样本 PGR=0.148 > PLR=0.098，DE=+0.05，方向一致。
 
 A 股本土化要改的三个地方（这是普通脚本做不对的）：
     1. 持有天数必须按**交易日**算，不能按自然日。
@@ -56,7 +62,7 @@ class DispositionReport:
     mode: str                              # "full" 或 "realized_only"
     pgr: Optional[float]                   # 盈利实现比例
     plr: Optional[float]                   # 亏损实现比例
-    disposition_effect: Optional[float]    # plr - pgr
+    disposition_effect: Optional[float]    # pgr - plr（正值 = 处置效应）
     realized_gain: float
     realized_loss: float
     paper_gain: float
@@ -152,7 +158,7 @@ def compute_disposition(
     else:
         pgr = float(rg / (rg + pg)) if (rg + pg) > 0 else None
         plr = float(rl / (rl + pl)) if (rl + pl) > 0 else None
-        de = (plr - pgr) if (pgr is not None and plr is not None) else None
+        de = (pgr - plr) if (pgr is not None and plr is not None) else None
 
     avg_win = _avg_hold(wins, trading_calendar)
     avg_loss = _avg_hold(losses, trading_calendar)

@@ -61,25 +61,30 @@ def _events_from_trades_csv(path: Path) -> list[Event]:
 def _synthetic_events() -> list[Event]:
     """内置合成场景：刻意构造一个"明显处置效应"的账户，便于教学演示。
 
-    - A：赚 1000 落袋（已实现盈利）
-    - B：浮盈 3000 没卖（账面盈利，PGR 被拉低）
-    - C：亏 200 割肉（已实现亏损）
-    - D：浮亏 200 死扛（账面亏损，PLR 被拉高）
-    => PGR=0.25, PLR=0.5, 处置效应=+0.25
+    处置效应 = 卖盈持亏（PGR 高、PLR 低），所以场景要这样搭：
+    - A：赚 1000，15 天就落袋        -> 已实现盈利 rg=1000（快卖赢家）
+    - B：浮盈 200，一直拿着没卖       -> 账面盈利 pg=200（拿住小赢家）
+    - C：亏 200，扛了 89 天才割        -> 已实现亏损 rl=200（慢割输家）
+    - D：浮亏 1000，继续死扛          -> 账面亏损 pl=1000（拿住大输家）
+
+    => PGR = 1000/(1000+200)  = 0.8333
+       PLR =  200/(200+1000)  = 0.1667
+       DE  = PGR - PLR        = +0.6667  -> 明显处置效应
+    同时赢家均持 15 天、输家均持 89 天，构成"赢家拿得比输家短"的典型指纹。
     """
     return [
         Event(date(2026, 1, 5), "A", EventType.BUY, D("100"), D("10"), D("0")),
-        Event(date(2026, 3, 5), "A", EventType.SELL, D("100"), D("20"), D("0")),
+        Event(date(2026, 1, 20), "A", EventType.SELL, D("100"), D("20"), D("0")),
         Event(date(2026, 1, 10), "B", EventType.BUY, D("100"), D("10"), D("0")),   # 未平仓
         Event(date(2026, 2, 1), "C", EventType.BUY, D("100"), D("10"), D("0")),
-        Event(date(2026, 4, 1), "C", EventType.SELL, D("100"), D("8"), D("0")),
-        Event(date(2026, 2, 5), "D", EventType.BUY, D("100"), D("10"), D("0")),   # 未平仓
+        Event(date(2026, 5, 1), "C", EventType.SELL, D("100"), D("8"), D("0")),
+        Event(date(2026, 3, 2), "D", EventType.BUY, D("200"), D("10"), D("0")),    # 未平仓
     ]
 
 
 def _synthetic_prices() -> dict[str, Decimal]:
-    # B 现价 40（浮盈），D 现价 8（浮亏）
-    return {"B": D("40"), "D": D("8")}
+    # B 现价 12（浮盈 200），D 现价 5（浮亏 1000）
+    return {"B": D("12"), "D": D("5")}
 
 
 def _last_prices(symbols: set[str]) -> dict[str, Decimal]:
@@ -129,19 +134,19 @@ def _card(rep, source: str) -> str:
 
 
 def _large_dataset() -> tuple[list[RealizedChunk], list[OpenPositionMV]]:
-    """教学用大样本：PGR=0.45、PLR=0.80，足以让 bootstrap 检出显著性。
+    """教学用大样本：卖盈持亏 -> 计数 PGR=0.80 > PLR=0.45，DE=+0.35，足以检出显著性。
 
     每笔盈亏金额相同（±100），所以金额口径与计数口径一致，便于对照。
     """
     chunks: list[RealizedChunk] = []
-    for i in range(18):
+    for i in range(32):
         chunks.append(RealizedChunk(f"G{i}", date(2026, 1, 5), date(2026, 2, 5),
                                     D("100"), D("1000"), money(D("1100"))))
-    for i in range(32):
+    for i in range(18):
         chunks.append(RealizedChunk(f"L{i}", date(2026, 1, 5), date(2026, 2, 5),
                                     D("100"), D("1000"), money(D("900"))))
-    opens = [OpenPositionMV(f"PG{i}", D("1000"), D("1200")) for i in range(22)]
-    opens += [OpenPositionMV(f"PL{i}", D("1000"), D("800")) for i in range(8)]
+    opens = [OpenPositionMV(f"PG{i}", D("1000"), D("1200")) for i in range(8)]
+    opens += [OpenPositionMV(f"PL{i}", D("1000"), D("800")) for i in range(22)]
     return chunks, opens
 
 
