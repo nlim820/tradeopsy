@@ -24,17 +24,20 @@
     part1_2025-11_2026-03_ths.csv     同花顺风格（UTF-8 BOM）
     part2_2026-04_2026-10_ht.csv      另一家风格（GB18030，费用分项）
     ../sample_account_prices.csv      2026-10-30 收盘价，供 --prices 使用
+    ../sample_account_price_history.csv  逐日收盘价，供 --price-history（滚动口径 PGR/PLR）
 """
 
 from __future__ import annotations
 
 import csv
-from datetime import date
+import math
+from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 PRICES_OUT = HERE.parent / "sample_account_prices.csv"
+HISTORY_OUT = HERE.parent / "sample_account_price_history.csv"
 
 D = Decimal
 CENT = D("0.01")
@@ -384,6 +387,96 @@ def write_prices(path: Path) -> None:
     path.write_text("\r\n".join(lines) + "\r\n", encoding="utf-8-sig")
 
 
+# ---------------------------------------------------------------------------
+# 逐日价格序列：滚动口径 PGR/PLR 需要"每个历史日期的价格"
+# ---------------------------------------------------------------------------
+
+#: 价格小数位。ETF 与转债单价低，2 位小数会把 1.05→1.12 这种波动糊掉。
+ASSET_DP = {STOCK: 2, ETF: 3, BOND: 3}
+
+#: 波动幅度上限。构造值，只为让折线看起来不像直尺画的 ——
+#: 真实行情当然比这复杂，示例数据的目的不是仿真，而是**可复现**。
+WOBBLE = 0.012
+
+
+def _weekdays_between(a: date, b: date) -> list[date]:
+    """[a, b) 内的工作日。含 a、不含 b —— 端点的日子各自归属相邻区间。"""
+    out: list[date] = []
+    d = a
+    while d < b:
+        if d.weekday() < 5:
+            out.append(d)
+        d += timedelta(days=1)
+    return out
+
+
+def _asset_of(symbol: str) -> str:
+    """从 SCRIPT 反查资产类型（决定价格保留几位小数）。
+
+    同一标的可能出现在多段 SCRIPT 里（分月导出），资产类型必然一致，
+    这里取首个命中即可。
+    """
+    for sym, _name, asset, _legs in SCRIPT:
+        if sym == symbol:
+            return asset
+    return STOCK
+
+
+def build_price_history(rows: list[dict]) -> list[tuple[date, str, Decimal]]:
+    """构造逐日收盘价序列。
+
+    做法：把每只标的的**成交价本身**当锚点，区间内线性插值，
+    再乘一个端点归零的正弦扰动。三个性质缺一不可：
+      1. 锚点日价格 == 当日成交价 —— 否则「他在这天卖出」和
+         「那天市价是多少」会自相矛盾，账面端算出来全是错的；
+      2. 端点扰动为 0 —— 保证性质 1 不被波动破坏；
+      3. 完全确定性 —— 同一份 SCRIPT 每次生成的结果逐字节相同，
+         否则测试没法钉死，示例也没法当回归基准。
+
+    同日同标的多笔（可转债 T+0）取**最后一笔**的价当收盘价：
+    对 T+0 品种来说,收盘价最接近当天最后一次成交。
+    """
+    anchors: dict[str, dict[date, Decimal]] = {}
+    for r in rows:
+        if r["price"] <= 0:
+            continue  # 分红 / 送转行没有价格
+        anchors.setdefault(r["symbol"], {})[r["dt"]] = r["price"]
+
+    out: list[tuple[date, str, Decimal]] = []
+    for sym, by_day in anchors.items():
+        pts = sorted(by_day.items())
+        # 期末仍有持仓的标的，补一个 2026-10-30 的收盘价锚点
+        last = CLOSE_2026_10_30.get(sym)
+        if last is not None and date.fromisoformat("2026-10-30") > pts[-1][0]:
+            pts.append((date.fromisoformat("2026-10-30"), D(last)))
+
+        dp = ASSET_DP.get(_asset_of(sym), 2)
+        q = D(1).scaleb(-dp)  # 0.01 或 0.001
+
+        for i in range(len(pts) - 1):
+            d0, p0 = pts[i]
+            d1, p1 = pts[i + 1]
+            span = (d1 - d0).days
+            for d in _weekdays_between(d0, d1):
+                t = D((d - d0).days) / D(span)
+                base = p0 + (p1 - p0) * t
+                wob = D(str(WOBBLE * math.sin(math.pi * float(t))
+                            * math.sin(2.7 * math.pi * float(t))))
+                px = (base * (D(1) + wob)).quantize(q, rounding=ROUND_HALF_UP)
+                out.append((d, sym, px))
+        # 末锚点单独补：上面的区间都是左闭右开，最后一个点没人管
+        out.append((pts[-1][0], sym, pts[-1][1]))
+
+    return sorted(out)
+
+
+def write_price_history(rows: list[tuple[date, str, Decimal]], path: Path) -> None:
+    lines = ["日期,证券代码,收盘价"]
+    for d, sym, px in rows:
+        lines.append(f"{d.isoformat()},{sym},{px}")
+    path.write_text("\r\n".join(lines) + "\r\n", encoding="utf-8-sig")
+
+
 def main() -> int:
     rows = build_rows()
     validate(rows)
@@ -396,11 +489,14 @@ def main() -> int:
     write_ths(part1, p1)
     write_ht(part2, p2)
     write_prices(PRICES_OUT)
+    hist = build_price_history(rows)
+    write_price_history(hist, HISTORY_OUT)
 
     total_fee = sum((r["comm"] + r["stamp"] + r["transfer"] for r in rows), D("0"))
     print(f"生成完成：共 {len(rows)} 条记录（前段 {len(part1)} / 后段 {len(part2)}）"
           f"，标的 {len({r['symbol'] for r in rows})} 只，费用合计 {money(total_fee)} 元")
-    for p in (p1, p2, PRICES_OUT):
+    print(f"逐日价格序列 {len(hist)} 条（{len({h[1] for h in hist})} 只标的）")
+    for p in (p1, p2, PRICES_OUT, HISTORY_OUT):
         print(f"  {p.relative_to(HERE.parent)}  ({p.stat().st_size} 字节)")
     return 0
 

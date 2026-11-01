@@ -24,6 +24,7 @@ from .analytics.disposition import (
     compute_disposition,
     open_positions_from_ledger,
 )
+from .analytics.rolling import RollingReport, rolling_disposition
 from .analytics.significance import SignificanceResult, bootstrap_disposition
 from .ledger import PositionLedger, summarize, timeline
 from .load import collect_inputs as _collect_inputs
@@ -31,6 +32,7 @@ from .load import dedupe as _dedupe
 from .load import load_dataset, read_benchmark, read_calendar, read_prices
 from .model import EventType
 from .parsers import parse_file
+from .prices import PriceHistory, read_price_history
 from .tradingcal import TradingCalendar
 
 TYPE_CN = {
@@ -127,6 +129,84 @@ def _render_significance(sig: SignificanceResult) -> str:
     for n in sig.notes:
         lines.append(f"   · {n}")
     return "\n".join(lines)
+
+
+def _render_rolling(roll: RollingReport, rep: DispositionReport | None = None) -> str:
+    """逐日滚动口径板块：Odean (1998) 原文口径，与期末快照口径并列。
+
+    两个口径摆在一起不是凑数 —— 它们的差额就是"口径敏感度"：
+    差额大说明期末那一天的账面恰好不代表历史，只看期末会看错人。
+    """
+    lines = ["", "【处置效应 · 逐日滚动口径（Odean 1998 原文）】"]
+
+    if roll.mode != "rolling" or not roll.has_result:
+        lines.append("  不可计算 —— 这不是 bug，是数据不足。")
+        for n in roll.notes:
+            lines.append(f"   · {n}")
+        return "\n".join(lines)
+
+    def p(x: float | None) -> str:
+        return "—" if x is None else f"{x:.2%}"
+
+    lines.append(
+        f"  有效观测 {roll.n_obs} 个卖出日"
+        f"（每个卖出日都按当日收盘价重估一次账面持仓）"
+    )
+    lines.append(
+        f"  盈利机会 {roll.n_gain_opp} 次 · 兑现 {roll.n_gain_sold} 次"
+        f"  → 计数 PGR {p(roll.pgr)}"
+    )
+    lines.append(
+        f"  亏损机会 {roll.n_loss_opp} 次 · 兑现 {roll.n_loss_sold} 次"
+        f"  → 计数 PLR {p(roll.plr)}"
+    )
+    if roll.de is not None:
+        lines.append(f"  处置效应 DE       {roll.de:+.2%}")
+    if roll.de_amount is not None:
+        lines.append(f"  金额口径 DE       {roll.de_amount:+.2%}"
+                     f"（PGR {p(roll.pgr_amount)} / PLR {p(roll.plr_amount)}）")
+    if roll.daily_de_mean is not None:
+        lines.append(
+            f"  日度 DE 均值      {roll.daily_de_mean:+.3f}"
+            f" ± {roll.daily_de_std:.3f}（{roll.n_daily_de} 日，观测间不独立，仅供参考）"
+        )
+    lines.append(f"  → {roll.verdict}")
+
+    # 口径对照：把两个数放一起，让人自己判断该信哪个
+    if rep is not None and rep.has_full:
+        snap = rep.disposition_effect or 0.0
+        if roll.de is not None:
+            diff = roll.de - snap
+            lines.append("")
+            lines.append(
+                f"  口径对照：期末快照 DE {snap:+.2%}"
+                f"  vs  逐日滚动 DE {roll.de:+.2%}  （差 {diff * 100:+.1f} 个百分点）"
+            )
+            lines.append("  " + _compare_verdict(snap, roll.de))
+    for n in roll.notes:
+        lines.append(f"   · {n}")
+    return "\n".join(lines)
+
+
+def _compare_verdict(snap: float, rolling_de: float) -> str:
+    """期末快照口径与逐日滚动口径的差异判读。
+
+    分三档而不是简单报个数：
+      方向相反 —— 最严重，说明"看期末那一天"会得出完全错误的结论；
+      幅度差异 —— 方向一致但量级不同，通常因为历史中的浮亏没被计入；
+      一致     —— 结论稳健，不依赖用哪天的价格。
+    """
+    diff = rolling_de - snap
+    if snap * rolling_de < 0:
+        return ("→ 两种口径**方向相反**：期末那一天的账面持仓不能代表历史，"
+                "只看期末会得出完全错误的结论。以逐日滚动口径为准。")
+    if abs(diff) < 0.05:
+        return "→ 两种口径基本一致，结论稳健，不依赖用哪一天的价格。"
+    if diff > 0:
+        return ("→ 逐日滚动更高：历史上有大量「浮盈没卖」的机会被期末口径漏掉了，"
+                "期末口径低估了你的处置效应。")
+    return ("→ 逐日滚动更低：历史上「浮亏没割」的机会被期末口径漏掉了。"
+            "注意：这说明你现在手里的浮亏不代表历史全貌。")
 
 
 def render(paths: list[Path], result, ledger: PositionLedger, dup: int, limit: int,
@@ -262,6 +342,9 @@ def _add_common_args(p: argparse.ArgumentParser) -> None:
                    help="交割单文件或目录，默认 private/")
     p.add_argument("--prices", default=None,
                    help="未平仓标的的最新价文件(CSV: 代码,价格)，用于算完整 PGR/PLR")
+    p.add_argument("--price-history", default=None,
+                   help="逐日价格序列(CSV: 日期,代码,收盘价)，用于逐卖出日滚动口径的 PGR/PLR"
+                        "（Odean 原文口径）；未给 --prices 时自动用其末价补期末口径")
     p.add_argument("--calendar", default=None,
                    help="交易日历文件（每行 YYYY-MM-DD，建议用行情K线日期导出）；"
                         "缺省按工作日近似")
@@ -320,6 +403,26 @@ def main(argv: list[str] | None = None) -> int:
 
     prices = read_prices(args.prices) if getattr(args, "prices", None) else None
 
+    price_history: PriceHistory | None = None
+    if getattr(args, "price_history", None):
+        price_history = read_price_history(args.price_history)
+        if price_history.problem:
+            # 价格序列读不出来就不能假装算了滚动口径 —— 静默降级会让
+            # 用户以为"这个功能对我没用"，而实际是他文件格式不对。
+            print(f"价格序列读取失败：{price_history.problem}", file=sys.stderr)
+            return 2
+        print(f"价格序列：{price_history.describe()}", file=sys.stderr)
+        if price_history.dups:
+            print(f"  同一(代码,日期)重复 {price_history.dups} 次，已按后出现的值覆盖",
+                  file=sys.stderr)
+        if price_history.bad_rows:
+            print(f"  无法解析的行 {price_history.bad_rows} 条，已跳过", file=sys.stderr)
+        if not prices:
+            # 只给序列也能跑两套口径，避免用户维护两份不同步的价格文件
+            prices = price_history.snapshot()
+            print(f"未给 --prices，用价格序列末价充当期末快照（{len(prices)} 只）",
+                  file=sys.stderr)
+
     if args.cmd == "report":
         from .report import build_report
 
@@ -329,7 +432,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.benchmark and not bench:
             print(f"基准文件没读到有效数据：{args.benchmark}", file=sys.stderr)
         html = build_report(ds, prices=prices or None, benchmark=bench or None,
-                            title=args.title)
+                            title=args.title, price_history=price_history)
         out = Path(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(html, encoding="utf-8")
@@ -340,11 +443,14 @@ def main(argv: list[str] | None = None) -> int:
 
     report = ds.disposition(prices or None)
     sig = ds.significance(prices or None) if prices else None
+    roll = ds.rolling(price_history) if price_history else None
 
     from .parsers.base import ParseResult
     merged = ParseResult(events=ds.events, warnings=ds.warnings)
     out_text = render(ds.paths, merged, ds.ledger, ds.dup, args.limit,
                       report, ds.file_metas, ds.calendar)
+    if roll is not None:
+        out_text += "\n" + _render_rolling(roll, report)
     if sig is not None:
         out_text += "\n" + _render_significance(sig)
     print(out_text)

@@ -19,24 +19,27 @@
 - **CSV 解析层**（编码/表头/列名自动适配）
 - **命令行体检报告**（`tradeopsy analyze`，逐笔已实现 + 按标的归因）
 - **处置效应引擎 PGR/PLR**（严格 Odean 1998 口径 + A 股持有期本土化）
+- **逐卖出日滚动口径**（Odean 原文精细版：每个卖出日重估账面端，T+1 当日买入不进分母；
+  与期末口径并列展示，DE 差额即口径敏感度，需 `--price-history` 逐日价格序列）
 - **显著性检验**（计数口径 bootstrap 置信区间 + 双比例 z 检验，小样本自动判"证据不足"）
 - **交易日历**（持有期按 A 股交易日口径，支持行情日期精确日历 / 工作日近似降级）
 - **单文件 HTML 体检报告**（`tradeopsy report`，零外部依赖、离线可看、每个数字可展开审计）
 - **示例账户数据集**（12 个月 / 两种券商格式 / 含送转配股分红可转债，可复现可测试）
 - **纸面账户日更管道**（每个交易日自动撮合、记账、出净值，跑在 GitHub Actions 上）
 
-**114 个测试全绿。**
+**151 个测试全绿。**
 
 一条命令看效果（离线、不联网）：
 
 ```bash
 # 生成单文件 HTML 体检报告（自带示例版：examples/sample_account_report.html）
+# 只给 --price-history 时，末价自动充当期末快照，两套口径一次出齐
 PYTHONPATH=src python -m tradeopsy report examples/sample_account \
-    --prices examples/sample_account_prices.csv -o report.html
+    --price-history examples/sample_account_price_history.csv -o report.html
 
 # 终端里看文本版
 PYTHONPATH=src python -m tradeopsy analyze examples/sample_account \
-    --prices examples/sample_account_prices.csv
+    --price-history examples/sample_account_price_history.csv
 
 python examples/disposition_demo.py          # 处置效应体检卡 + 显著性（Wrapped 风格）
 PYTHONPATH=src python -m tradeopsy analyze fixtures   # 最小黄金样本

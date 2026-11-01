@@ -23,6 +23,7 @@ tradeopsy 的定位是"体检**你自己的**交割单"。但真实交割单涉�
 | `part1_2025-11_2026-03_ths.csv` | 上半段。**同花顺风格**：UTF-8 BOM、抬头占 3 行、负数表示卖出、单列"手续费"包干 |
 | `part2_2026-04_2026-10_ht.csv` | 下半段。**另一家券商风格**：GB18030 编码、费用拆成净佣金/印花税/过户费三列、正数表示卖出、列顺序不同 |
 | `../sample_account_prices.csv` | 2026-10-30 收盘价（构造值），供 `--prices` 计算未平仓市值 |
+| `../sample_account_price_history.csv` | 逐日收盘价（构造值，2787 条），供 `--price-history` 计算逐日滚动口径 PGR/PLR |
 
 拆成两份不是随意为之：真实用户往往按月或按半年导出，拼接后才是一整年。
 两份格式不同，正好把解析层的**编码嗅探、表头定位、列名模糊匹配、费用分项合并**
@@ -48,7 +49,7 @@ tradeopsy 的定位是"体检**你自己的**交割单"。但真实交割单涉�
 ```bash
 cd D:/projects/tradeopsy
 PYTHONPATH=src python -m tradeopsy analyze examples/sample_account \
-    --prices examples/sample_account_prices.csv
+    --price-history examples/sample_account_price_history.csv
 ```
 
 跑出来的关键结果（确定性，可核对）：
@@ -58,6 +59,8 @@ PYTHONPATH=src python -m tradeopsy analyze examples/sample_account \
 - 2 条告警（担保品划转、利息归本），解析未中断
 - PGR 58.48% / PLR 40.05% → 处置效应 **+18.43%**（金额口径）
 - 计数口径 PGR 74.07% / PLR 38.46% → DE **+35.61%**，bootstrap p=0.031
+- 逐日滚动口径（Odean 原文）：24 个卖出日，PGR 19.23% / PLR 3.14% → DE **+16.09%**，
+  与期末口径基本一致（差 −2.3 个百分点），结论稳健
 - 赢家平均持有 **52.1 天**，输家平均持有 **147.8 天**
 
 最后一行才是这份数据真正想表达的东西：**赚了就跑、亏了死扛**，

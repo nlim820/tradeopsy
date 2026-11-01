@@ -29,9 +29,11 @@ from decimal import Decimal
 from html import escape as _escape
 
 from .analytics.disposition import DispositionReport
+from .analytics.rolling import DailyObs, RollingReport
 from .analytics.significance import SignificanceResult
 from .load import Dataset
 from .model import RealizedChunk, money
+from .prices import PriceHistory
 
 __all__ = ["build_report", "persona_tags", "one_liner", "hold_bins"]
 
@@ -434,6 +436,67 @@ def svg_bins(rows: list[tuple[str, int, int]], unit: str, height: int = 250) -> 
     return "".join(parts)
 
 
+def svg_daily_de(obs: list[DailyObs], height: int = 230) -> str:
+    """逐日处置效应柱状图。
+
+    为什么值得单独画：pooled 的 DE 是一个数，掩盖了「有些卖出日 DE 是负的」
+    这件事。图上能直接看出日度 DE 的离散程度 —— 如果柱子全在同一侧，
+    结论就稳；如果上下乱跳，那个 pooled 均值就该被谨慎对待。
+    这也是本图不画"平均线 + 置信带"的原因：日度观测不独立，
+    画一条带标准误的横线会伪装出根本不存在的精度。
+    """
+    pts = [(o.dt, o.de) for o in obs if o.de is not None]
+    if not pts:
+        return '<p class="empty">没有可用的日度观测：每个卖出日都缺账面端数据。</p>'
+
+    vals = [d for _, d in pts]
+    # y 轴对称：零轴必须在正中，"向哪边偏"才是第一眼能读到的信息
+    top = max(0.2, round(max(abs(v) for v in vals) + 0.05, 1))
+    bot = -top
+
+    n = len(pts)
+    inner_w = _W - _PAD_L - _PAD_R
+    inner_h = height - _PAD_T - _PAD_B
+    slot = inner_w / n
+    bw = max(1.5, min(slot * 0.62, 15.0))
+
+    def y(v: float) -> float:
+        return _PAD_T + (top - v) / (top - bot) * inner_h
+
+    parts = [
+        f'<svg viewBox="0 0 {_W} {height}" class="chart" role="img" '
+        f'aria-label="逐日处置效应柱状图，共 {n} 个卖出日，'
+        f"取值范围 {min(vals):.2f} 到 {max(vals):.2f}\">"
+    ]
+
+    for t in _ticks(bot, top, 4):
+        yy = y(t)
+        dash = ' stroke-dasharray="3 3"' if abs(t) > 1e-9 else ' stroke-width="1.5"'
+        parts.append(f'<line x1="{_PAD_L}" y1="{yy:.1f}" x2="{_W - _PAD_R}" y2="{yy:.1f}" '
+                     f'class="grid"{dash}/>')
+        parts.append(f'<text x="{_PAD_L - 8}" y="{yy + 4:.1f}" class="ytick" '
+                     f'text-anchor="end">{t:+.1f}</text>')
+
+    zero = y(0)
+    for i, (d, v) in enumerate(pts):
+        cx = _PAD_L + slot * (i + 0.5)
+        yv = y(v)
+        # SVG 的 rect.y 是矩形顶部、height 向下延伸：
+        # 正柱顶部在 yv（比零轴靠上）、负柱顶部在零轴。取 min 定顶、取绝对值定高。
+        y_top = min(zero, yv)
+        h = abs(yv - zero)
+        cls = "bar-win" if v >= 0 else "bar-loss"
+        parts.append(f'<rect x="{cx - bw / 2:.1f}" y="{y_top:.1f}" width="{bw:.1f}" '
+                     f'height="{max(0.8, h):.1f}" class="{cls}"/>')
+
+    for i in sorted({0, n // 2, n - 1}):
+        parts.append(f'<text x="{_PAD_L + slot * (i + 0.5):.1f}" y="{height - 12}" '
+                     f'class="xtick" text-anchor="middle">{pts[i][0].strftime("%y-%m-%d")}</text>')
+
+    parts.append("</svg>")
+    return "".join(parts)
+
+
 # ---------------------------------------------------------------- 样式
 #
 # 全部内联。字体用系统栈（不下载 webfont，否则离线打开会闪一下或直接变宋体）。
@@ -585,6 +648,109 @@ def _signed_span(v: float) -> str:
     return "up" if v > 0 else ("down" if v < 0 else "flat")
 
 
+def _compare_line(snap: float | None, roll: float | None) -> str:
+    """两种口径的差异判读。与 CLI 里的 _compare_verdict 同一套逻辑，
+    分开写是因为一边要纯文本、一边要带标签的 HTML —— 合并只会让两边都别扭。"""
+    if snap is None or roll is None:
+        return "两种口径无法直接比较（其中一边缺数据）。"
+    diff = roll - snap
+    if snap * roll < 0:
+        return ("<b>方向相反</b>：期末那一天的账面持仓不能代表历史，"
+                "只看期末会得出完全错误的结论。<b>以逐日滚动口径为准</b>。")
+    if abs(diff) < 0.05:
+        return "两种口径基本一致，<b>结论稳健</b>，不依赖用哪一天的价格。"
+    if diff > 0:
+        return ("逐日滚动更高：历史上有大量「浮盈没卖」的机会被期末口径漏掉了，"
+                "期末口径<b>低估</b>了处置效应。")
+    return ("逐日滚动更低：历史上有大量「浮亏没割」的机会被期末口径漏掉了。"
+            "换句话说，你现在手里的浮亏<b>不代表历史全貌</b>。")
+
+
+def _rolling_block(roll: RollingReport, rep: DispositionReport) -> list[str]:
+    """逐日滚动口径区块。数据不足时也说清楚缺什么，而不是整块消失。"""
+    out = ['<section class="block">', "<h2>逐日滚动口径：每个卖出日都算一次</h2>"]
+
+    if roll.mode != "rolling" or not roll.has_result:
+        out.append(
+            '<p class="note">这个口径需要<b>逐日价格序列</b>，当前算不出来 —— '
+            "不是 bug，是数据不足。补法：<b>--price-history</b> "
+            "（CSV：日期,证券代码,收盘价）。</p>"
+        )
+        if roll.notes:
+            out.append('<p class="note">' + "<br>".join(_esc(n) for n in roll.notes) + "</p>")
+        out.append("</section>")
+        return out
+
+    out.append(
+        "<p>上一节的期末口径只用「今天还没卖的」头寸算账面端，历史上那些"
+        "「当时浮盈、后来卖掉」「当时浮亏、后来割掉」的机会全部丢失。"
+        "这一节换成 Odean (1998) 原文的做法：<b>每个卖出日都重新问一次</b> —— "
+        "此刻还有哪些浮盈 / 浮亏的头寸本可以卖，却没卖。</p>"
+    )
+
+    out.append('<div class="kpis">')
+    out.append(_kpi(
+        "滚动口径 DE", _pct_signed(roll.de), _signed_span(roll.de or 0.0),
+        f"{roll.n_obs} 个卖出日 · 计数口径",
+        f"盈利机会 <b>{roll.n_gain_opp}</b> 次中兑现 <b>{roll.n_gain_sold}</b> 次 "
+        f"→ PGR {_pct(roll.pgr, 2)}<br>"
+        f"亏损机会 <b>{roll.n_loss_opp}</b> 次中兑现 <b>{roll.n_loss_sold}</b> 次 "
+        f"→ PLR {_pct(roll.plr, 2)}<br>"
+        f"DE = PGR − PLR = <b>{_pct_signed(roll.de, 2)}</b>。<br>"
+        f"「机会」是逐日累加的：同一笔浮亏在持有的每一天都被计入一次。",
+    ))
+    if roll.de_amount is not None:
+        out.append(_kpi(
+            "滚动 · 金额口径", _pct_signed(roll.de_amount), _signed_span(roll.de_amount),
+            "按金额加权",
+            f"PGR {_pct(roll.pgr_amount, 2)} − PLR {_pct(roll.plr_amount, 2)} "
+            f"= <b>{_pct_signed(roll.de_amount, 2)}</b>。<br>"
+            f"与计数口径方向一致时，说明「笔数上」和「钱的体量上」都成立。",
+        ))
+    if roll.daily_de_mean is not None:
+        out.append(_kpi(
+            "日度 DE 离散", f"{roll.daily_de_std:.2f}", "",
+            f"均值 {roll.daily_de_mean:+.2f} / σ {roll.daily_de_std:.2f}",
+            f"{roll.n_daily_de} 个日度观测的标准差。<br>"
+            "σ 大 = 你的行为在不同日子差别很大，"
+            "那个 pooled 均值只代表<b>平均状态</b>。<br>"
+            "（日度观测彼此不独立，这个数不构成标准误，只作离散度参考。）",
+        ))
+    out.append("</div>")
+
+    out.append(
+        '<div class="legend"><span><i style="background:var(--up)"></i>'
+        "DE &gt; 0：当日卖出的盈利多于割掉的亏损</span>"
+        '<span><i style="background:var(--down)"></i>DE &lt; 0</span></div>'
+    )
+    out.append(f'<div class="scroll">{svg_daily_de(roll.obs)}</div>')
+    out.append(
+        f'<p class="note">每根柱子是一个卖出日。柱子的<b>高低差异本身</b>才是这张图的重点：'
+        f"如果上下乱跳，pooled 出来的那一个数就该被谨慎对待。"
+        f"共 {roll.n_obs} 个观测日，纵轴固定对称以保证零轴居中。</p>"
+    )
+
+    if rep.has_full:
+        diff = (roll.de - (rep.disposition_effect or 0.0)) * 100
+        out.append(
+            f'<p class="note"><b>口径对照</b>：期末快照 DE '
+            f"{_pct_signed(rep.disposition_effect)} vs 逐日滚动 DE "
+            f"{_pct_signed(roll.de)}（差 {diff:+.1f} 个百分点）。"
+            f"{_compare_line(rep.disposition_effect, roll.de)}</p>"
+        )
+
+    # 披露放在折叠里：重要但不必占据首屏
+    out.append(_details(
+        "依据与局限：这个口径为什么不能和上一节直接比",
+        "<br>".join(_esc(n) for n in roll.notes)
+        + "<br><b>成本</b>：需要逐日价格序列，且价格缺失 / 停牌会直接影响分母。"
+        + "<br><b>口径差</b>：PGR/PLR 的绝对值在本口径下通常明显低于期末口径，"
+        "这不是行为变了，而是分母随持有天数膨胀。跨口径可比的只有 <b>DE</b>。",
+    ))
+    out.append("</section>")
+    return out
+
+
 def build_report(
     ds: Dataset,
     *,
@@ -592,6 +758,7 @@ def build_report(
     benchmark: dict[date, Decimal] | None = None,
     generated_at: datetime | None = None,
     title: str = "交易体检报告",
+    price_history: PriceHistory | None = None,
 ) -> str:
     """生成完整单文件 HTML。"""
     ledger = ds.ledger
@@ -599,6 +766,7 @@ def build_report(
     summary = ds.summary()
     rep = ds.disposition(prices)
     sig = ds.significance(prices) if prices else None
+    roll = ds.rolling(price_history) if price_history else None
     span = ds.span
     unit = "交易日" if rep.hold_days_trading else "自然日"
     now = generated_at or datetime.now()
@@ -743,6 +911,9 @@ def build_report(
             "这不是 bug，是数据不足 —— 报告不会用一个退化的数字假装算完了。</p>"
         )
     disp_block.append("</section>")
+
+    # --- 逐日滚动口径（提供逐日价格序列时才出现）
+    roll_block = _rolling_block(roll, rep) if roll is not None else []
 
     # --- 收益曲线
     curve = equity_curve(chunks)
@@ -940,7 +1111,7 @@ def build_report(
         f"<title>{_esc(title)} · tradeopsy</title>"
         f"<style>{_CSS}</style></head><body><main>"
         + "".join(head) + "".join(verdict) + "".join(kpis)
-        + "".join(disp_block) + "".join(curve_block) + "".join(bins_block)
+        + "".join(disp_block) + "".join(roll_block) + "".join(curve_block) + "".join(bins_block)
         + "".join(bench_block) + "".join(detail) + "".join(footer)
         + "</main></body></html>"
     )

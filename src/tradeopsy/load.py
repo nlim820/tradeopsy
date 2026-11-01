@@ -25,11 +25,13 @@ from .analytics.disposition import (
     compute_disposition,
     open_positions_from_ledger,
 )
+from .analytics.rolling import RollingReport, rolling_disposition
 from .analytics.significance import SignificanceResult, bootstrap_disposition
 from .ledger import PositionLedger, summarize, timeline
 from .model import Event
 from .parsers import parse_file
 from .parsers.base import ParseResult
+from .prices import PriceHistory
 from .tradingcal import TradingCalendar
 
 __all__ = ["Dataset", "load_dataset", "read_calendar", "read_prices", "dedupe"]
@@ -198,6 +200,27 @@ class Dataset:
 
     def significance(self, prices: dict[str, Decimal] | None = None) -> SignificanceResult:
         return bootstrap_disposition(self.ledger.chunks, self.open_positions(prices))
+
+    def rolling(
+        self,
+        price_history: "PriceHistory | None",
+        *,
+        max_stale_days: int = 30,
+    ) -> RollingReport | None:
+        """逐卖出日滚动口径。price_history 为空时返回 None（与"算了但无结果"区分开）。
+
+        为什么返回 None 而不是空报告：调用方要能区分
+        「用户没给价格序列」和「给了但算不出来」—— 前者不该在报告里
+        出现一个"数据不足"的板块，那只会制造噪音。
+        """
+        if not price_history:
+            return None
+        return rolling_disposition(
+            self.events,
+            price_history,
+            trading_calendar=self.calendar,
+            max_stale_days=max_stale_days,
+        )
 
 
 def load_dataset(
