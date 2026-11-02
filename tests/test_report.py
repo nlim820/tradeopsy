@@ -147,6 +147,14 @@ class TestOneLiner(unittest.TestCase):
         line = one_liner(self._rep(), sig, 5)
         self.assertIn("不足以", line)
 
+    def test_negative_de_says_reverse_not_disposition(self):
+        """回归：DE 为负时头条必须说「反向」，不能照抄「处置效应迹象」。"""
+        line = one_liner(self._rep(de=-0.24), _sig(-0.24, 0.40), 5)
+        self.assertIn("反向", line)
+        self.assertNotIn("处置效应迹象", line)
+        line_pos = one_liner(self._rep(de=0.24), _sig(0.24, 0.40), 5)
+        self.assertIn("处置效应迹象", line_pos)
+
 
 class TestPersonaTags(unittest.TestCase):
     def test_dead_holding_detected(self):

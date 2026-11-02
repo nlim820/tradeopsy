@@ -295,7 +295,10 @@ def one_liner(rep: DispositionReport, sig: SignificanceResult | None, n_realized
                 f"（DE {_pct_signed(sig.de_count)}，p={sig.p_value_boot:.3f}）。")
     de = rep.disposition_effect
     if de is not None and abs(de) > 0.10:
-        return (f"从数据看你有处置效应迹象（DE {_pct_signed(de)}），"
+        if de > 0:
+            return (f"从数据看你有处置效应迹象（DE {_pct_signed(de)}，卖盈持亏），"
+                    f"但样本量还不足以证明它不是偶然。")
+        return (f"从数据看你有反向迹象（DE {_pct_signed(de)}，卖亏持盈），"
                 f"但样本量还不足以证明它不是偶然。")
     return (f"已实现 {n_realized} 笔，盈亏两端的兑现节奏没有明显偏向 —— "
             f"样本量也还撑不起更强的结论。")
@@ -1161,7 +1164,7 @@ def build_report(
             f"（{_money(curve[-1][1])}）。<br>"
             f"最大回撤：遍历曲线，记录「当前值 − 历史最高值」的最小值 = <b>{_money(mdd)}</b>。<br>"
             "注意：这是<b>已实现</b>口径，不含未平仓浮盈浮亏。"
-            "所以它衡量的是「落袋的这部分钱」的画相，不是你账户总资产。",
+            "所以它衡量的是「落袋的这部分钱」的画像，不是你账户总资产。",
         ))
     curve_block.append("</section>")
 
