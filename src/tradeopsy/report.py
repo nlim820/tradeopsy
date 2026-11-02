@@ -202,8 +202,10 @@ def persona_tags(
                 evidence=(
                     f"金额口径 PGR {_pct(rep.pgr)} · PLR {_pct(rep.plr)} · DE {_pct_signed(de)}。"
                     + (f" 计数口径 DE {_pct_signed(sig.de_count)}，"
-                       f"bootstrap p={sig.p_value_boot:.4f}"
-                       f"{'（显著）' if strong else '（不显著，证据不足）'}。"
+                       + (f"bootstrap p={sig.p_value_boot:.4f}"
+                          f"{'（显著）' if strong else '（不显著，证据不足）'}。"
+                          if sig.p_value_boot is not None else
+                          "单侧已实现为 0，bootstrap 无法构造，统计上无从谈起。")
                        if sig is not None and sig.de_count is not None else
                        " 未提供未平仓市值，仅有金额口径。")
                 ),
@@ -1073,7 +1075,10 @@ def build_report(
             f"PGR {_pct(sig.pgr_count, 2)} · PLR {_pct(sig.plr_count, 2)} · "
             f"DE {_pct_signed(sig.de_count, 2)}<br>"
             f"95% 置信区间 [{_pct_signed(sig.ci_low, 2)}, {_pct_signed(sig.ci_high, 2)}]，"
-            f"bootstrap p={sig.p_value_boot:.4f}，n_boot={sig.n_boot}，seed={sig.seed}。<br>"
+            + (f"bootstrap p={sig.p_value_boot:.4f}，n_boot={sig.n_boot}，seed={sig.seed}。"
+               if sig.p_value_boot is not None else
+               "bootstrap 未构造（单侧已实现为 0）。")
+            + f"<br>"
             f"<b>{_esc(sig.verdict)}</b>",
         ))
     kpis.append(_kpi(

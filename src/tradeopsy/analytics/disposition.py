@@ -77,6 +77,10 @@ class DispositionReport:
     #: 自然日口径的平均持有期，仅用于和交易日口径对照展示（口径差异的证据）
     avg_hold_win_calendar: float = 0.0
     avg_hold_loss_calendar: float = 0.0
+    #: 机会数：盈利端 = 已实现盈利笔数 + 期末浮盈持仓数；亏损端同构。
+    #: 机会数决定方向性判定的可信度 —— 任一端太少时 verdict 拒绝给方向。
+    n_gain_opp: int = 0
+    n_loss_opp: int = 0
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -86,7 +90,19 @@ class DispositionReport:
     @property
     def verdict(self) -> str:
         if not self.has_full:
-            return "样本不足或未提供未平仓市值，无法判定处置效应（仅给出已实现画像）。"
+            # 区分「真的没有那一端」和「没给价格」—— 两者给同一句话会误导。
+            if self.pgr is None and self.plr is None:
+                return "样本不足或未提供未平仓市值，无法判定处置效应（仅给出已实现画像）。"
+            if self.pgr is None:
+                return ("观察期内没有任何盈利端机会（从未在盈利状态卖出、期末也无浮盈），"
+                        "处置效应无从谈起 —— 这本身是信息：你没有『落袋』行为。")
+            return ("观察期内没有任何亏损端机会（从未割肉、期末也无浮亏），"
+                    "处置效应无从谈起。")
+        small = min(self.n_gain_opp, self.n_loss_opp)
+        if small < 8:
+            return (f"样本太小（盈利端 {self.n_gain_opp} 个机会 / 亏损端 "
+                    f"{self.n_loss_opp} 个），方向性判定不可靠 —— "
+                    "请以显著性检验的置信区间为准，不要看这里的方向。")
         de = self.disposition_effect or 0.0
         if de > 0.10:
             return "明显处置效应：倾向于过早卖出盈利、长期持有亏损。"
@@ -173,11 +189,17 @@ def compute_disposition(
     pg = Decimal("0")   # paper gain
     pl = Decimal("0")   # paper loss（取正值）
     n_open = 0
+    n_open_gain = 0
+    n_open_loss = 0
     if open_positions is not None:
         for op in open_positions:
             n_open += 1
             pg += max(op.paper_gain, Decimal("0"))
             pl += max(-op.paper_gain, Decimal("0"))
+            if op.paper_gain > 0:
+                n_open_gain += 1
+            elif op.paper_gain < 0:
+                n_open_loss += 1
 
     mode = "full" if open_positions is not None else "realized_only"
 
@@ -219,6 +241,8 @@ def compute_disposition(
         paper_loss=float(pl),
         n_realized=len(chunks),
         n_open=n_open,
+        n_gain_opp=len(wins) + n_open_gain,
+        n_loss_opp=len(losses) + n_open_loss,
         win_rate=round(len(wins) / len(chunks), 4) if chunks else 0.0,
         avg_hold_win=avg_win,
         avg_hold_loss=avg_loss,

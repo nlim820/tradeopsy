@@ -86,6 +86,23 @@ class TestDispositionNoEffect(unittest.TestCase):
     def test_mode_full_and_verdict_balanced(self):
         r = compute_disposition(self.chunks, self.opens)
         self.assertEqual(r.mode, "full")
+        self.assertEqual(r.n_gain_opp, 3)
+        self.assertEqual(r.n_loss_opp, 3)
+        # 3+3 个机会太少：方向性判定被拒绝（verdict 的样本量门槛）
+        self.assertIn("样本太小", r.verdict)
+
+    def test_balanced_verdict_with_enough_sample(self):
+        """同样 0.5/0.5，机会数够了才允许说「不明显」。"""
+        chunks = [chunk("A", date(2026, 1, 5), date(2026, 3, 5), "1000.00", "2000.00")]
+        chunks += [chunk(f"W{i}", date(2026, 1, 5), date(2026, 3, 5),
+                         "1000.00", "0.01") for i in range(9)]
+        chunks += [chunk("B", date(2026, 2, 1), date(2026, 4, 1), "1000.00", "-1000.00")]
+        chunks += [chunk(f"L{i}", date(2026, 2, 1), date(2026, 4, 1),
+                         "1000.00", "-0.01") for i in range(9)]
+        opens = [mv("C", "1000.00", "4000.00"), mv("D", "2000.00", "500.00")]
+        r = compute_disposition(chunks, opens)
+        self.assertAlmostEqual(r.pgr, 0.4, places=2)
+        self.assertAlmostEqual(r.plr, 0.4, places=2)
         self.assertIn("处置效应不明显", r.verdict)
 
 
@@ -98,21 +115,27 @@ class TestDispositionStrongEffect(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.chunks = [
-            chunk("A", date(2026, 1, 5), date(2026, 3, 5), "1000.00", "1000.00"),   # rg +1000
-            chunk("C", date(2026, 2, 1), date(2026, 4, 1), "1000.00", "-200.00"),   # rl -200
-        ]
+        # 机会数每端 ≥ 8：低于这个量级 verdict 会拒绝给方向（见 test_small_sample）
+        self.chunks = [chunk("A", date(2026, 1, 5), date(2026, 3, 5), "1000.00", "1000.00")]
+        self.chunks += [chunk(f"W{i}", date(2026, 1, 5), date(2026, 3, 5),
+                              "1000.00", "0.01") for i in range(11)]        # 12 个已实现盈利
+        self.chunks.append(chunk("C", date(2026, 2, 1), date(2026, 4, 1),
+                                 "1000.00", "-200.00"))
+        self.chunks += [chunk(f"L{i}", date(2026, 2, 1), date(2026, 4, 1),
+                              "1000.00", "-0.01") for i in range(9)]         # 10 个已实现亏损
         self.opens = [
             mv("B", "1000.00", "1200.00"),    # pg +200
             mv("D", "3000.00", "1000.00"),    # pl +2000
         ]
+        # 金额口径不受零星小笔影响：主导项仍是 rg=1000 / rl=200 / pg=200 / pl=2000
 
     def test_pgr_plr_and_effect(self):
         r = compute_disposition(self.chunks, self.opens)
-        self.assertAlmostEqual(r.pgr, 1000 / 1200, places=6)
-        self.assertAlmostEqual(r.plr, 200 / 2200, places=6)
-        self.assertAlmostEqual(r.disposition_effect, 1000 / 1200 - 200 / 2200, places=6)
-        self.assertGreater(r.disposition_effect, 0.0)
+        self.assertAlmostEqual(r.pgr, 1000 / 1200, places=2)
+        self.assertAlmostEqual(r.plr, 200 / 2200, places=2)
+        self.assertGreater(r.disposition_effect, 0.10)
+        self.assertEqual(r.n_gain_opp, 13)
+        self.assertEqual(r.n_loss_opp, 11)
 
     def test_verdict_strong(self):
         r = compute_disposition(self.chunks, self.opens)
@@ -120,18 +143,16 @@ class TestDispositionStrongEffect(unittest.TestCase):
 
 
 class TestReverseDisposition(unittest.TestCase):
-    """反向：割肉快、赚钱拿得住 -> PGR 低、PLR 高 -> DE < -0.10。
-
-    rg=1000, pg=3000  -> PGR = 1000/4000 = 0.25
-    rl=200,  pl=200   -> PLR = 200/400   = 0.50
-    DE = 0.25 - 0.50 = -0.25，应判"反向处置效应"。
-    """
+    """反向：割肉快、赚钱拿得住 -> PGR 低、PLR 高 -> DE < -0.10。"""
 
     def setUp(self) -> None:
-        self.chunks = [
-            chunk("A", date(2026, 1, 5), date(2026, 3, 5), "1000.00", "1000.00"),
-            chunk("C", date(2026, 2, 1), date(2026, 4, 1), "1000.00", "-200.00"),
-        ]
+        self.chunks = [chunk("A", date(2026, 1, 5), date(2026, 3, 5), "1000.00", "1000.00")]
+        self.chunks += [chunk(f"W{i}", date(2026, 1, 5), date(2026, 3, 5),
+                              "1000.00", "0.01") for i in range(9)]          # 10 个已实现盈利
+        self.chunks.append(chunk("C", date(2026, 2, 1), date(2026, 4, 1),
+                                 "1000.00", "-200.00"))
+        self.chunks += [chunk(f"L{i}", date(2026, 2, 1), date(2026, 4, 1),
+                              "1000.00", "-0.01") for i in range(11)]        # 12 个已实现亏损
         self.opens = [
             mv("B", "1000.00", "4000.00"),   # pg +3000
             mv("D", "1000.00", "800.00"),    # pl +200
@@ -139,9 +160,11 @@ class TestReverseDisposition(unittest.TestCase):
 
     def test_effect_negative(self):
         r = compute_disposition(self.chunks, self.opens)
-        self.assertAlmostEqual(r.pgr, 0.25, places=6)
-        self.assertAlmostEqual(r.plr, 0.5, places=6)
-        self.assertAlmostEqual(r.disposition_effect, -0.25, places=6)
+        self.assertLess(r.pgr, 0.3)
+        self.assertGreater(r.plr, 0.4)
+        self.assertAlmostEqual(r.disposition_effect, -0.25, places=2)
+        self.assertEqual(r.n_gain_opp, 11)
+        self.assertEqual(r.n_loss_opp, 13)
 
     def test_verdict_reverse(self):
         r = compute_disposition(self.chunks, self.opens)
@@ -224,6 +247,44 @@ class TestOpenPositionsFromLedger(unittest.TestCase):
         ])
         opens = open_positions_from_ledger(ledger, prices=None)
         self.assertEqual(opens[0].paper_gain, D("0.00"))
+
+
+class TestVerdictSampleSize(unittest.TestCase):
+    """方向性判定必须受样本量约束 —— 这是十套模拟人格实测抓出的真问题：
+
+    长线账户只有 4 个盈利机会，旧版照样写「明显处置效应」，
+    与显著性检验的「证据不足」自相矛盾。
+    """
+
+    def test_tiny_sample_refuses_direction(self):
+        chunks = [chunk("A", date(2026, 1, 5), date(2026, 3, 5), "1000.00", "1000.00"),
+                  chunk("C", date(2026, 2, 1), date(2026, 4, 1), "1000.00", "-200.00")]
+        opens = [mv("B", "1000.00", "1200.00"),
+                 mv("D", "3000.00", "1000.00")]
+        r = compute_disposition(chunks, opens)
+        self.assertGreater(r.disposition_effect, 0.10)      # 方向上确实很大
+        self.assertIn("样本太小", r.verdict)                 # 但 verdict 拒绝给方向
+        self.assertIn("置信区间", r.verdict)
+
+    def test_no_gain_side_says_so(self):
+        """从未在盈利时卖出、期末无浮盈：PGR 端为空，要说清是哪种空。"""
+        chunks = [chunk("C", date(2026, 2, 1), date(2026, 4, 1), "1000.00", "-200.00")]
+        chunks += [chunk(f"L{i}", date(2026, 2, 1), date(2026, 4, 1),
+                         "1000.00", "-0.01") for i in range(9)]
+        opens = [mv("D", "3000.00", "1000.00")]              # 只有浮亏
+        r = compute_disposition(chunks, opens)
+        self.assertIsNone(r.pgr)
+        self.assertIn("盈利端", r.verdict)
+        self.assertIn("落袋", r.verdict)
+
+    def test_no_loss_side_says_so(self):
+        chunks = [chunk("A", date(2026, 1, 5), date(2026, 3, 5), "1000.00", "1000.00")]
+        chunks += [chunk(f"W{i}", date(2026, 1, 5), date(2026, 3, 5),
+                         "1000.00", "0.01") for i in range(9)]
+        opens = [mv("B", "1000.00", "1200.00")]              # 只有浮盈
+        r = compute_disposition(chunks, opens)
+        self.assertIsNone(r.plr)
+        self.assertIn("亏损端", r.verdict)
 
 
 if __name__ == "__main__":

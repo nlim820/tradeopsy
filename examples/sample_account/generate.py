@@ -237,10 +237,10 @@ SCRIPT: list[tuple[str, str, str, list[tuple]]] = [
 ]
 
 
-def build_rows() -> list[dict]:
-    """把 SCRIPT 展开成扁平的成交记录，并逐条算出手续费。"""
+def expand_script(script: list[tuple]) -> list[dict]:
+    """把脚本展开成扁平成交记录，并逐条算出手续费。供本账户与人造人格库共用。"""
     rows: list[dict] = []
-    for symbol, name, asset, legs in SCRIPT:
+    for symbol, name, asset, legs in script:
         for leg in legs:
             kind, day = leg[0], date.fromisoformat(leg[1])
             if kind in ("B", "S"):
@@ -290,6 +290,11 @@ def build_rows() -> list[dict]:
     return rows
 
 
+def build_rows() -> list[dict]:
+    """本账户的脚本展开入口。"""
+    return expand_script(SCRIPT)
+
+
 def validate(rows: list[dict]) -> None:
     """自检：日期必须是工作日；股票/ETF 不能违反 T+1；卖出不能超过持仓。
 
@@ -332,13 +337,13 @@ def validate(rows: list[dict]) -> None:
                 lot[1] -= take
                 remaining -= take
             holdings[sym] = [l for l in lots if l[1] > 0]
-            # T+1：股票/ETF 当日买入当日不可卖；可转债（11 开头）豁免
+            # T+1：股票/ETF 当日买入当日不可卖；可转债（11/12 开头，沪深两市）豁免
             same_day_buy = any(
                 r2["dt"] == r["dt"] and r2["symbol"] == sym
                 and r2["biz"] in ("证券买入", "新股入账", "配股缴款")
                 for r2 in rows
             )
-            if same_day_buy and not sym.startswith("11"):
+            if same_day_buy and not sym.startswith(("11", "12")):
                 raise ValueError(f"{r['dt']} {sym} 涉嫌 T+1 违规：当日买入当日卖出")
 
 
@@ -346,11 +351,16 @@ def _fmt(x: Decimal) -> str:
     return f"{x:.2f}"
 
 
-def write_ths(rows: list[dict], path: Path) -> None:
-    """同花顺风格：UTF-8 BOM、抬头两行、负数量表示卖出、单列"手续费"包干。"""
+def write_ths(rows: list[dict], path: Path, *,
+              account: str = "88888888",
+              range_text: str = "20251101-20260331") -> None:
+    """同花顺风格：UTF-8 BOM、抬头两行、负数量表示卖出、单列“手续费”包干。
+
+    account / range_text 可参数化，供人造人格库复用同一解析格式。
+    """
     lines: list[str] = [
-        "资金账号,88888888",
-        "查询区间,20251101-20260331 人民币",
+        f"资金账号,{account}",
+        f"查询区间,{range_text} 人民币",
         "",
         "成交日期,证券代码,证券名称,业务名称,成交数量,成交价格,成交金额,手续费",
     ]
@@ -363,12 +373,14 @@ def write_ths(rows: list[dict], path: Path) -> None:
     path.write_text("\r\n".join(lines) + "\r\n", encoding="utf-8-sig")
 
 
-def write_ht(rows: list[dict], path: Path) -> None:
+def write_ht(rows: list[dict], path: Path, *,
+             account: str = "66666666",
+             range_text: str = "20260401-20261030") -> None:
     """另一家风格：GB18030、抬头三行、正数量表示卖出、费用拆三列、列顺序不同。"""
     lines: list[str] = [
         "华泰证券股份有限公司 客户对账单",
-        "资金账号:66666666",
-        "查询区间:20260401-20261030",
+        f"资金账号:{account}",
+        f"查询区间:{range_text}",
         "发生日期,证券编码,证券简称,摘要,成交股数,成交均价,发生金额,净佣金,印花税,过户费",
     ]
     for r in rows:
