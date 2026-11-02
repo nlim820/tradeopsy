@@ -716,15 +716,8 @@ def main() -> int:
         files: list[Path] = []
         rng_text = f"{START:%Y%m%d}-{END:%Y%m%d}"
         acct = pid[1:3] + "0000" + pid[1:3]
-        if fmt == "ths" or cut is None:
-            p = out_dir / f"{pid}_{rng_text}_ths.csv"
-            write_ths(rows, p, account=acct, range_text=rng_text)
-            files.append(p)
-        elif fmt == "ht":
-            p = out_dir / f"{pid}_{rng_text}_ht.csv"
-            write_ht(rows, p, account=acct, range_text=rng_text)
-            files.append(p)
-        else:  # mixed
+        if fmt == "mixed" and cut is not None:
+            # 两种券商格式年中拼接（演示分月导出后合并的真实形态）
             part1 = [r for r in rows if r["dt"] < cut]
             part2 = [r for r in rows if r["dt"] >= cut]
             p1 = out_dir / f"{pid}_part1_ths.csv"
@@ -734,6 +727,14 @@ def main() -> int:
             write_ht(part2, p2, account=acct,
                      range_text=f"{cut:%Y%m%d}-{END:%Y%m%d}")
             files += [p1, p2]
+        elif fmt == "ht":
+            p = out_dir / f"{pid}_{rng_text}_ht.csv"
+            write_ht(rows, p, account=acct, range_text=rng_text)
+            files.append(p)
+        else:
+            p = out_dir / f"{pid}_{rng_text}_ths.csv"
+            write_ths(rows, p, account=acct, range_text=rng_text)
+            files.append(p)
 
         hist = build_history(rows, closes)
         hp = HERE / f"{pid}_price_history.csv"
