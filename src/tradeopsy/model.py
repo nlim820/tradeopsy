@@ -58,7 +58,8 @@ class EventType(str, Enum):
 #: 顺序有意义：先匹配更具体的词，避免「红股入账」被「股份」泛匹配掉。
 BUSINESS_NAME_RULES: tuple[tuple[tuple[str, ...], EventType], ...] = (
     (("红股入账", "送股入账", "转增", "红股"), EventType.SPLIT),
-    (("股息入账", "红利入账", "股息红利", "派息"), EventType.DIVIDEND),
+    (("股息入账", "红利入账", "股息红利", "派息", "红利税", "股息税", "红利补税"),
+     EventType.DIVIDEND),
     (("配股缴款", "配股"), EventType.RIGHTS),
     (("新股入账", "中签", "申购中签"), EventType.IPO_ALLOT),
     (("证券买入", "买入", "担保品买入"), EventType.BUY),

@@ -224,6 +224,60 @@ class TestCrossYear(unittest.TestCase):
         self.assertEqual(c.pnl, money("484.54"))
 
 
+class TestSplitAllocation(unittest.TestCase):
+    """F11 送转股数分配：不整除时总股数必须精确、且不许出现小数股。
+
+    回归背景：旧实现按 ratio = new_total/total_qty 逐批相乘再舍入，
+    非整除时每批漂移 ±0.00005 股且产生小数批次。
+    """
+
+    def test_split_allocation_is_exact_and_integer(self):
+        led = PositionLedger()
+        led.apply_all(
+            [
+                buy(date(2026, 7, 1), "600000", "7", "10.00"),
+                buy(date(2026, 7, 2), "600000", "100", "10.00"),
+                # 总持仓 107，10 送 3 应得 32.1 -> 实际到账 32 股
+                split(date(2026, 7, 3), "600000", "32"),
+            ]
+        )
+        lots = led._lots["600000"]
+        total = sum(l.qty for l in lots)
+        self.assertEqual(total, D("139"))          # 107 + 32，精确
+        for l in lots:
+            self.assertEqual(l.qty % 1, D("0"))    # 每批都是整数股
+        # 成本一分不动
+        self.assertEqual(sum(l.cost for l in lots), money("1070.00"))
+
+    def test_split_zero_qty_is_rejected(self):
+        led = PositionLedger()
+        led.apply_all(
+            [
+                buy(date(2026, 7, 1), "600000", "100", "10.00"),
+                split(date(2026, 7, 2), "600000", "0"),
+            ]
+        )
+        lots = led._lots["600000"]
+        self.assertEqual(sum(l.qty for l in lots), D("100"))
+        self.assertTrue(led.warnings)
+
+
+class TestSellZeroQty(unittest.TestCase):
+    """F12 卖出数量为 0：整笔跳过，费用不得记到不存在的卖出上。"""
+
+    def test_zero_qty_sell_skipped(self):
+        led = PositionLedger()
+        led.apply_all(
+            [
+                buy(date(2026, 7, 1), "600000", "100", "10.00", "5.00"),
+                sell(date(2026, 7, 2), "600000", "0", "10.00", "3.00"),
+            ]
+        )
+        self.assertEqual(led.chunks, [])
+        self.assertEqual(led.sell_fees, D("0"))
+        self.assertTrue(led.warnings)
+
+
 class TestRobustness(unittest.TestCase):
     """F9/F10 脏数据容错：宁可警告也不要炸掉整批。"""
 

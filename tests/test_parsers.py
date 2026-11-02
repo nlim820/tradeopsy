@@ -16,6 +16,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from tradeopsy.__main__ import _dedupe
+from tradeopsy.load import dedupe as dedupe_tagged
 from tradeopsy.model import Event, EventType
 from tradeopsy.parsers import detect, parse_file, to_date, to_decimal
 
@@ -136,6 +137,78 @@ class TestDedupe(unittest.TestCase):
         out, dup = _dedupe([e, same, different])
         self.assertEqual(len(out), 2)
         self.assertEqual(dup, 1)
+
+    def test_same_file_double_identical_buy_is_kept(self):
+        """回归：同一天两笔完全相同的合法买入（拆单/同价补单）不得被去重吞掉。
+
+        旧实现把扁平列表里所有完全相同的记录都当重复，
+        同文件里的第二笔会被静默丢弃，盈亏直接少算。
+        """
+        e1 = Event(dt=date(2026, 10, 30), symbol="510300",
+                   etype=EventType.BUY, qty=Decimal("100"),
+                   price=Decimal("4.00"), fee=Decimal("5.00"))
+        e2 = Event(dt=date(2026, 10, 30), symbol="510300",
+                   etype=EventType.BUY, qty=Decimal("100"),
+                   price=Decimal("4.00"), fee=Decimal("5.00"))
+        # 旧语义（不带来源）：仍去重，兼容老调用方
+        out, dup = _dedupe([e1, e2])
+        self.assertEqual((len(out), dup), (1, 1))
+        # 新语义（带文件来源）：同一文件内的两笔都保留
+        out2, dup2 = dedupe_tagged([e1, e2], sources=[0, 0])
+        self.assertEqual((len(out2), dup2), (2, 0))
+
+    def test_cross_file_overlap_deduped_with_sources(self):
+        """带来源去重后，跨文件的重叠记录仍要去掉。"""
+        e = Event(dt=date(2026, 10, 30), symbol="600519",
+                  etype=EventType.BUY, qty=Decimal("100"),
+                  price=Decimal("1680"), fee=Decimal("50.40"))
+        same = Event(dt=date(2026, 10, 30), symbol="600519",
+                     etype=EventType.BUY, qty=Decimal("100"),
+                     price=Decimal("1680"), fee=Decimal("50.40"))
+        other = Event(dt=date(2026, 10, 31), symbol="600519",
+                      etype=EventType.SELL, qty=Decimal("100"),
+                      price=Decimal("1700"), fee=Decimal("51.00"))
+        # e/same 来自两个文件（重叠），other 只在第二个文件
+        out, dup = dedupe_tagged([e, other, same], sources=[0, 1, 1])
+        self.assertEqual(len(out), 2)
+        self.assertEqual(dup, 1)
+
+
+class TestDividendTaxRow(unittest.TestCase):
+    """回归：红利税补扣行金额是负数，旧实现 abs() 会把它变成正的分红收入。
+
+    持股不满一年卖出时，券商补扣红利税，交割单上会出现
+    「股息红利差异税扣税」这类业务名，发生金额为负。
+    """
+
+    def test_tax_row_keeps_negative_sign(self):
+        content = (
+            "成交日期,证券代码,证券名称,业务名称,成交数量,成交价格,成交金额\n"
+            "2026-03-02,600000,浦发银行,股息红利,0,0.00,300.00\n"
+            "2026-04-10,600000,浦发银行,股息红利差异税扣税,0,0.00,-45.00\n"
+        )
+        p = _write_tmp(content, "utf-8")
+        r = parse_file(p)
+        self.assertEqual(len(r.events), 2)
+        normal, tax = r.events
+        self.assertEqual(normal.cash, Decimal("300.00"))
+        # 税行：cash 保留负号（冲减分红），fee 记绝对值留痕
+        self.assertEqual(tax.cash, Decimal("-45.00"))
+        self.assertEqual(tax.fee, Decimal("45.00"))
+
+    def test_tax_row_reduces_total_pnl(self):
+        """端到端：税行进账本后，总收益必须减少，而不是倒赚。"""
+        from tradeopsy.ledger import PositionLedger
+        content = (
+            "成交日期,证券代码,证券名称,业务名称,成交数量,成交价格,成交金额\n"
+            "2026-03-02,600000,浦发银行,股息入账,0,0.00,100.00\n"
+            "2026-04-10,600000,浦发银行,红利税补扣,0,0.00,-20.00\n"
+        )
+        p = _write_tmp(content, "utf-8")
+        r = parse_file(p)
+        led = PositionLedger()
+        led.apply_all(r.events)
+        self.assertEqual(led.total_dividend(), Decimal("80.00"))
 
 
 class TestDetection(unittest.TestCase):

@@ -335,6 +335,21 @@ class GenericCsvParser(Parser):
             )
 
         if etype is EventType.DIVIDEND:
+            raw_txt = raw_biz + raw_flag
+            # 红利税补扣行（如「股息红利差异税扣税」「红利税补扣」）：
+            # 金额几乎总是**负数**（从账户里扣钱）。旧实现 abs() 会把它变成
+            # 一笔正的"分红收入" —— 分红没少算、税还倒赚一遍，方向完全反了。
+            # 这里保留符号让账本直接冲减累计分红；abs 后记进 fee 仅为留痕。
+            is_tax = any(k in raw_txt for k in ("红利税", "差异税", "补扣", "扣税"))
+            if is_tax:
+                if amount == 0 and fee == 0:
+                    return None, ParseWarning(row_no, "红利税记录金额为 0", ",".join(row))
+                return (
+                    Event(dt=dt, symbol=symbol, etype=etype,
+                          qty=Decimal("0"), price=Decimal("0"),
+                          fee=abs(amount), cash=amount),
+                    None,
+                )
             cash = abs(amount) if amount != 0 else Decimal("0")
             if cash == 0 and fee == 0:
                 return None, ParseWarning(row_no, "分红记录金额为 0", ",".join(row))

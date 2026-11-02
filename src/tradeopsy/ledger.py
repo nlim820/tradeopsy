@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import date
-from decimal import Decimal
+from decimal import ROUND_FLOOR, Decimal
 from typing import TYPE_CHECKING
 
 from .model import (
@@ -26,7 +26,6 @@ from .model import (
     OpenPosition,
     RealizedChunk,
     money,
-    unit_price,
 )
 
 if TYPE_CHECKING:  # 仅类型标注用，避免运行期循环导入
@@ -82,6 +81,11 @@ class PositionLedger:
         self.buy_fees += ev.fee
 
     def _sell(self, ev: Event) -> None:
+        if ev.qty <= 0:
+            # 0 股卖出不该发生（解析层已拦），但程序化构造的 Event 仍可能进来。
+            # 不拦的话下面的 sell_fees += ev.fee 会把费用记到一笔不存在的卖出上。
+            self._warn(ev, "卖出数量为 0，已跳过")
+            return
         lots = self._lots.get(ev.symbol, [])
         available = sum((l.qty for l in lots), Decimal("0"))
         if available <= 0:
@@ -144,7 +148,7 @@ class PositionLedger:
     def _split(self, ev: Event) -> None:
         """送股 / 转增：股数增加，总成本不变。
 
-        实现上对每个批次同比例放大股数、同比例缩小每股成本。
+        实现上对每个批次按持仓占比分摊新增股数（最大余数法）。
         这样「总成本 = 各批次 qty × unit_cost 之和」保持不变，
         而每股成本自动变成摊薄后的值 —— 和券商 App 显示的成本价一致。
         """
@@ -153,11 +157,28 @@ class PositionLedger:
         if total_qty <= 0:
             self._warn(ev, f"收到送转 {ev.qty} 股但没有底仓，已跳过")
             return
-        new_total = total_qty + ev.qty
-        ratio = new_total / total_qty
-        for lot in lots:
+        if ev.qty <= 0:
+            self._warn(ev, f"送转数量为 {ev.qty}，已跳过")
+            return
+        # 按各批次持仓占比分配新增股数（最大余数法）：
+        #   Σ新增 == ev.qty 精确成立，且每批股数仍是整数 —— 现实中不存在
+        #   "9.0935 股"这种批次。
+        #   旧实现用 ratio = new_total/total_qty 逐批相乘再按 4 位小数舍入：
+        #   非整除时每批会漂移 ±0.00005 股，总股数不再精确等于
+        #   「送转前 + 送转数量」，而且会产生小数股，后续 FIFO 会把
+        #   这个小数一路传染下去。
+        raw = [ev.qty * l.qty / total_qty for l in lots]
+        floors = [r.to_integral_value(rounding=ROUND_FLOOR) for r in raw]
+        remain = int(ev.qty - sum(floors, Decimal("0")))
+        order = sorted(
+            range(len(lots)), key=lambda i: raw[i] - floors[i], reverse=True
+        )
+        adds = list(floors)
+        for i in order[:remain]:
+            adds[i] += 1
+        for lot, add in zip(lots, adds):
             # 只动股数，不动总成本 —— 这是零漂移的关键
-            lot.qty = unit_price(lot.qty * ratio)
+            lot.qty += add
 
     def _dividend(self, ev: Event) -> None:
         """现金分红：不影响持仓成本，单独累计。

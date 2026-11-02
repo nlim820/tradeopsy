@@ -44,23 +44,78 @@ __all__ = ["Dataset", "load_dataset", "read_calendar", "read_prices", "dedupe"]
 DATA_SUFFIXES = (".csv", ".txt", ".tsv")
 
 
-def dedupe(events: list[Event]) -> tuple[list[Event], int]:
+def dedupe(
+    events: list[Event],
+    sources: list[int] | None = None,
+) -> tuple[list[Event], int]:
     """跨文件去重。
 
     真实场景：用户按月导出，相邻两个文件的区间可能重叠几天
     （比如 3 月文件带上了 4 月 1 日的成交）。不去重就是把同一笔算两遍，
     而盈亏会直接翻倍 —— 这种错误看起来很"合理"，最难被发现。
+
+    sources
+    ----
+    与 events 等长的文件来源序号（第 i 个文件的记录标 i）。
+    给出时按「同一笔记录在多个文件里重复出现」去重：
+        同一键保留 max(各文件出现次数) 条。
+    这样能同时满足两个此前互斥的需求：
+        · 跨文件重叠区间 → 重复记录被去掉（每个键在两份文件里各出现 1 次，
+          保留 max(1,1)=1 条）；
+        · 同一天两笔完全相同的合法交易（拆单、同价补单）→ 不会被误吞
+          （同一文件内出现 2 次，保留 max=2 条）。
+        旧的全量去重会把后者当成重复静默丢掉，盈亏直接少算一笔。
+
+    不给 sources 时保持旧语义：扁平列表里完全相同的记录只留一条
+    （兼容老调用方；load_dataset 恒走带 sources 的路径）。
     """
-    seen: set[tuple] = set()
+    if sources is not None and len(sources) != len(events):
+        raise ValueError("sources 与 events 长度不一致")
+
+    def key_of(e: Event) -> tuple:
+        return (e.dt, e.symbol, e.etype, e.qty, e.price, e.fee, e.cash)
+
+    ordered = sorted(
+        range(len(events)),
+        key=lambda i: (
+            events[i].dt,
+            events[i].symbol,
+            events[i].etype.value,
+        ),
+    )
+
+    if sources is None:
+        seen: set[tuple] = set()
+        out: list[Event] = []
+        dup = 0
+        for i in ordered:
+            k = key_of(events[i])
+            if k in seen:
+                dup += 1
+                continue
+            seen.add(k)
+            out.append(events[i])
+        return out, dup
+
+    # ---- 带文件来源的去重：每键保留 max(各文件出现次数) 条 ----
+    per_key: dict[tuple, dict[int, int]] = {}
+    for i in ordered:
+        k = key_of(events[i])
+        per_file = per_key.setdefault(k, {})
+        per_file[sources[i]] = per_file.get(sources[i], 0) + 1
+
     out: list[Event] = []
     dup = 0
-    for e in sorted(events, key=lambda x: (x.dt, x.symbol, x.etype.value)):
-        key = (e.dt, e.symbol, e.etype, e.qty, e.price, e.fee, e.cash)
-        if key in seen:
+    kept: dict[tuple, int] = {}
+    for i in ordered:
+        k = key_of(events[i])
+        target = max(per_key[k].values())
+        n = kept.get(k, 0)
+        if n < target:
+            kept[k] = n + 1
+            out.append(events[i])
+        else:
             dup += 1
-            continue
-        seen.add(key)
-        out.append(e)
     return out, dup
 
 
@@ -265,17 +320,19 @@ def load_dataset(
     返回的 Dataset 即使 0 条事件也合法（调用方据此给出诊断信息）。
     """
     paths = collect_inputs(target)
-    all_events: list[Event] = []
+    tagged: list[tuple[Event, int]] = []
     warnings: list[str] = []
     metas: list[tuple[str, dict]] = []
-    for p in paths:
+    for i, p in enumerate(paths):
         r = parse_file(p)
-        all_events.extend(r.events)
+        tagged.extend((ev, i) for ev in r.events)
         warnings.extend(r.warnings)
         metas.append((p.name, dict(r.meta)))
 
-    merged = ParseResult(events=all_events, warnings=warnings)
-    events, dup = dedupe(merged.events)
+    merged = ParseResult(events=[ev for ev, _ in tagged], warnings=warnings)
+    events, dup = dedupe(
+        merged.events, sources=[i for _, i in tagged] if tagged else None
+    )
 
     ledger = PositionLedger()
     ledger.apply_all(events)
