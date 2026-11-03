@@ -151,6 +151,14 @@ class Tag:
     evidence: str        # 可展开的依据说明
 
 
+#: 「死扛型」的判定阈值：输家平均持有期 ÷ 赢家平均持有期。
+#: 提成常量的原因：同一份数据在 persona_tags（画像标签）和 one_liner
+#: （一句话结论）里都要判它。两处阈值一旦分叉，就会出现
+#: 「标签说死扛型、结论说没有明显偏向」这种同一屏自相矛盾的输出 ——
+#: 这不是排版问题，是读者会直接质疑报告可信度的正确性问题。
+_HOLD_RATIO = 1.8
+
+
 def persona_tags(
     rep: DispositionReport,
     sig: SignificanceResult | None,
@@ -176,14 +184,14 @@ def persona_tags(
     # 1) 死扛型：输家拿的时间远超赢家
     if rep.avg_hold_win > 0 and rep.avg_hold_loss > 0:
         ratio = rep.avg_hold_loss / rep.avg_hold_win
-        if ratio >= 1.8:
+        if ratio >= _HOLD_RATIO:
             tags.append(Tag(
                 name="死扛型",
                 strength=min(ratio / 5, 1.0),
                 desc=f"输家平均拿 {rep.avg_hold_loss} {unit}，赢家只拿 {rep.avg_hold_win} {unit}。",
                 evidence=(
                     f"亏损笔平均持有 / 盈利笔平均持有 = {rep.avg_hold_loss} / "
-                    f"{rep.avg_hold_win} = {ratio:.2f} 倍。判定阈值 ≥1.8 倍。\n"
+                    f"{rep.avg_hold_win} = {ratio:.2f} 倍。判定阈值 ≥{_HOLD_RATIO} 倍。\n"
                     # cal_line 是内部生成的日历说明（非用户数据）；
                     # evidence 由 build_report 统一转义，这里再转一次会变成 &lt;br&gt;
                     f"{cal_line}"
@@ -294,14 +302,188 @@ def one_liner(rep: DispositionReport, sig: SignificanceResult | None, n_realized
         return (f"你在做反人性的事：亏损实现比例高于盈利实现比例"
                 f"（DE {_pct_signed(sig.de_count)}，p={sig.p_value_boot:.3f}）。")
     de = rep.disposition_effect
+    # 时间维度是**独立**于 DE 的一套证据：赢家是否跑得比输家快。
+    # 它不依赖价格，任何模式下都算得出来 —— 所以不能因为 DE 缺席就当它不存在。
+    # 之前这里只看 de，导致「画像标签说死扛型 2.8 倍」和
+    # 「一句话结论说没有明显偏向」同时出现在首屏，读者第一眼就会怀疑报告。
+    ratio = (rep.avg_hold_loss / rep.avg_hold_win
+             if rep.avg_hold_win > 0 and rep.avg_hold_loss > 0 else 0.0)
+
     if de is not None and abs(de) > 0.10:
         if de > 0:
             return (f"从数据看你有处置效应迹象（DE {_pct_signed(de)}，卖盈持亏），"
                     f"但样本量还不足以证明它不是偶然。")
         return (f"从数据看你有反向迹象（DE {_pct_signed(de)}，卖亏持盈），"
                 f"但样本量还不足以证明它不是偶然。")
+
+    if de is None:
+        # 缺未平仓市值时严格 DE 算不出来，但「赢家跑得比输家快」这个形状
+        # 本身是可观测的方向证据 —— 说「没有明显偏向」就等于丢掉它。
+        if ratio >= _HOLD_RATIO:
+            return (f"你卖掉的赚钱票平均只拿了 {rep.avg_hold_win} {unit}，"
+                    f"亏钱的却扛了 {rep.avg_hold_loss} {unit}（{ratio:.1f} 倍）—— "
+                    f"处置效应的典型形状。但缺未平仓市值，严格的 DE 算不出来，"
+                    f"这只能算行为迹象，不能算统计结论。")
+    elif ratio >= _HOLD_RATIO:
+        # 兑现率看不出偏向、持有期却差很多：两个维度不一致，本身就是结论。
+        return (f"从兑现率看，盈亏两端差不多（DE {_pct_signed(de)}）；"
+                f"但从时间看，赚钱的只拿 {rep.avg_hold_win} {unit}、"
+                f"亏钱的扛了 {rep.avg_hold_loss} {unit}（{ratio:.1f} 倍）。"
+                f"两个维度不一致 —— 你的「卖盈持亏」更多体现在拖时间，"
+                f"而不是体现在卖出的次数上。")
+
+    if n_realized < 5:
+        # 1~4 笔时说「没有明显偏向」是假中性 —— 那点观测根本分不出偏向。
+        return (f"只有 {n_realized} 笔已实现，样本太少 —— "
+                f"现在判断「有没有处置效应」跟瞎猜区别不大，先多攒几个月记录。")
+
     return (f"已实现 {n_realized} 笔，盈亏两端的兑现节奏没有明显偏向 —— "
             f"样本量也还撑不起更强的结论。")
+
+
+#: 术语速查。放在「30 秒版」里作为折叠块 —— 一次给全，好过在正文 20 多处
+#: 反复插括号解释（那会让懂行的人觉得啰嗦，让不懂的人仍然串联不起来）。
+_GLOSSARY = (
+    "<b>PGR（盈利兑现比例）</b>：手里赚钱的机会中，你卖掉了多少。"
+    "越高 = 越爱落袋为安。<br>"
+    "<b>PLR（亏损兑现比例）</b>：手里亏钱的机会中，你割掉了多少。"
+    "越低 = 越爱死扛。<br>"
+    "<b>DE（处置效应）</b>：PGR 减 PLR。正数 = 卖盈持亏（典型）；负数 = 反向（卖亏持盈）。<br>"
+    "<b>金额口径 / 计数口径</b>：前者按钱算，一笔大的能带偏整体；后者按笔算，"
+    "一笔一万和一笔一百等价。两个都看，是因为它们有时会在同一批数据上给出相反答案 —— "
+    "那本身就是一条信息。<br>"
+    "<b>bootstrap 置信区间</b>：把你这批交易反复重抽样上万次，看 DE 会落在什么范围。"
+    "区间不跨 0 = 这个方向不是运气。<br>"
+    "<b>样本量门槛</b>：任一端机会少于 8 个，程序就拒绝给方向。不是保守 —— "
+    "4 个样本算出来的 DE 可以很漂亮，但它是噪声。"
+)
+
+
+def _tldr(
+    rep: DispositionReport,
+    sig: SignificanceResult | None,
+    head_line: str,
+    tags: list,
+    *,
+    n_realized: int,
+    n_events: int,
+    n_symbols: int,
+    span_days: int,
+    unit: str,
+) -> list[str]:
+    """报告顶部「如果你只有 30 秒」。
+
+    为什么单独立这一块，而不是把话说短一点塞进结论里：
+        这份报告的默认读者不是量化研究员，而是「愿意花 30 秒判断这东西
+        靠不靠谱」的人（老师、面试官、朋友）。他们有判断力，但没有时间
+        把一千多行读完。所以这一屏必须自己回答三件事 ——
+          ① 它到底在回答什么问题（不知道问题，就无法评价答案）
+          ② 答案是什么、有多可信（结论和证据强度一起给，不藏）
+          ③ 它不做什么（主动交代边界比多给一个数字更能建立信任）
+        下面的专业分析一个字都不删：想深究的人继续往下翻，两拨人各取所需。
+
+    三条依据是**动态**生成的，不是写死的文案 —— 数据不同，说法必须不同；
+    数据不足时如实降级，绝不为了版面整齐编一条出来。
+    """
+    facts: list[str] = []
+
+    # ① 持有时间对比：最直观的一条，不需要任何统计背景就能懂
+    hw, hl = rep.avg_hold_win, rep.avg_hold_loss
+    if n_realized and hw and hl:
+        facts.append(
+            f"<b>卖掉的赚钱票平均只拿了 {hw} {unit}，亏钱的却扛了 {hl} {unit}</b>"
+            f"（{hl / hw:.1f} 倍）—— 赚了赶紧跑、亏了舍不得割，"
+            "这是处置效应最典型的样子。"
+        )
+    elif n_realized and hw and not hl:
+        facts.append(
+            f"<b>这期间没有一笔亏损卖出</b>，赚的钱平均拿了 {hw} {unit} 就走。"
+            "「死扛亏损」那一端在数据里根本不存在 —— 是没亏过，还是亏了没卖，"
+            "本报告分不出来。"
+        )
+
+    # ② 兑现率：处置效应的本体
+    if rep.has_full:
+        facts.append(
+            f"<b>盈利时兑现 {_pct(rep.pgr)}，亏损时只兑现 {_pct(rep.plr)}</b>，"
+            f"差 {_pct_signed(rep.disposition_effect)}（这个差值就是 DE）。"
+        )
+    else:
+        facts.append(
+            "<b>没给未平仓市值，兑现率算不出来</b> —— PGR/PLR 的分母要"
+            "「已实现 + 账面」两端，缺账面端硬算会退化成 1.0，"
+            "数学成立但完全误导。下面只展示已实现画像。"
+            "补法：<code>--prices</code> 给一份「代码,最新价」的 CSV。"
+        )
+
+    # ③ 可信度：诚实地告诉读者这个结论能承重多少
+    if sig is not None and sig.p_value_boot is not None:
+        ok = _sig_ok(sig)
+        facts.append(
+            f"<b>{n_realized} 笔已实现，bootstrap p={sig.p_value_boot:.3f}，"
+            f"{'撑得住统计检验' if ok else '还撑不住统计检验'}</b>"
+            + (f"（95% 置信区间 {_pct_signed(sig.ci_low)} ~ "
+               f"{_pct_signed(sig.ci_high)}）"
+               if sig.ci_low is not None and sig.ci_high is not None else "")
+            + "。"
+            + ("" if ok else "方向可以参考，但别当成定论。")
+        )
+    elif sig is not None:
+        facts.append(
+            f"<b>{n_realized} 笔已实现，但盈亏两端样本不均衡"
+            f"（盈利机会 {sig.n_gain_total} / 亏损机会 {sig.n_loss_total}）</b>，"
+            "bootstrap 无法构造 —— 程序因此拒绝给方向。"
+        )
+    else:
+        facts.append(
+            f"<b>{n_realized} 笔已实现</b>，但没有给未平仓市值，"
+            "所以没做显著性检验 —— 下面的结论只能当描述，不能当统计推断。"
+        )
+
+    out = [
+        '<section class="tldr">',
+        '<div class="tldr-eyebrow">如果你只有 30 秒</div>',
+        '<p class="tldr-big">这份报告只回答一个问题：<br>'
+        "你是不是「赚一点就跑、亏了死扛」？</p>",
+        '<p class="tldr-explain">这在行为金融里叫<b>处置效应</b>'
+        "（Disposition Effect）：卖掉的赚钱机会多于卖掉的亏损机会，就是有。"
+        "它被公认是散户长期跑不赢宽基指数的原因之一 —— "
+        "因为它的实际效果是<b>截断盈利、放大亏损</b>，"
+        "赢的时候赚一点，输的时候输很多。"
+        f"你的样本：{n_events} 条交割记录 / {n_symbols} 只标的 / "
+        f"{span_days} 天。</p>",
+        '<div class="tldr-divider"></div>',
+        '<div class="tldr-eyebrow">你的答案</div>',
+        f'<p class="tldr-answer">{_esc(head_line)}</p>',
+    ]
+    # 画像标签跟着结论走：它们是对同一件事的另外几个侧面，
+    # 拆到单独的卡片里会让读者以为是两份不同的判断。
+    tag_html = []
+    for i, t in enumerate(tags[:3]):
+        rev = " rev" if "反处置" in t.name else ""
+        cls = f"tag primary{rev}" if i == 0 and t.strength >= 0.25 else "tag"
+        tag_html.append(
+            f'<span class="{cls}" title="{_esc(t.desc)}">{_esc(t.name)}</span>'
+        )
+    out.append('<div class="tags">' + "".join(
+        tag_html or ['<span class="tag">尚无足够数据形成画像</span>']
+    ) + "</div>")
+    for t in tags[:3]:
+        out.append(
+            f'<details><summary>{_esc(t.name)} · {_esc(t.desc)}</summary>'
+            f'<div class="body pre">{_esc(t.evidence)}</div></details>'
+        )
+    out.append('<ul class="tldr-facts">')
+    out.extend(f"<li>{f}</li>" for f in facts)
+    out.append("</ul>")
+    out.append(_details("看不懂 PGR / PLR / DE / 置信区间？展开看这 6 条", _GLOSSARY))
+    out.append(
+        '<p class="tldr-limit"><b>它不做什么：</b>不预测收益、不推荐标的、不评价未来。'
+        "它只把<b>已经发生</b>的交易行为量化 —— 数据是历史，结论是倾向，不是预言。"
+        "完整的边界说明见下方「这个报告不做什么」。</p>"
+    )
+    out.append("</section>")
+    return out
 
 
 # ---------------------------------------------------------------- SVG 图表
@@ -530,7 +712,36 @@ body{margin:0;background:var(--bg);color:var(--ink);
 main{max-width:860px;margin:0 auto;padding:28px 18px 64px}
 h1{font-size:26px;font-weight:600;margin:6px 0 4px;letter-spacing:-.01em}
 h2{font-size:17px;font-weight:600;margin:0 0 14px;letter-spacing:-.005em}
+/* 章节标题的「人话主标题 + 专业名副标题」：主标题负责让人愿意读下去，
+   副标题负责让懂行的人知道这块的学术名字。两者都不能省。 */
+h2 small{display:block;font-size:12.5px;font-weight:400;color:var(--ink3);
+  letter-spacing:0;margin-top:5px;line-height:1.5}
 h3{font-size:15px;font-weight:600;margin:18px 0 8px}
+
+/* 「如果你只有 30 秒」：给没时间读完这份报告的人。
+   视觉上要比 verdict 更抢眼 —— 它是唯一一处「读完就走也不亏」的内容。 */
+.tldr{background:var(--card);border:1px solid var(--line);border-radius:14px;
+  padding:24px 24px 20px;margin-bottom:16px}
+.tldr-eyebrow{font-size:11px;letter-spacing:.14em;color:var(--ink3);
+  font-weight:600;margin-bottom:8px}
+.tldr-big{font-size:22px;font-weight:600;line-height:1.42;letter-spacing:-.02em;margin:0 0 10px}
+.tldr-explain{font-size:13.5px;color:var(--ink2);line-height:1.78;margin:0}
+.tldr-divider{height:1px;background:var(--line);margin:20px 0}
+.tldr-answer{font-size:19px;line-height:1.58;font-weight:500;margin:0 0 14px;letter-spacing:-.01em}
+.tldr-facts{list-style:none;padding:0;margin:0}
+.tldr-facts li{position:relative;padding-left:16px;font-size:13.5px;color:var(--ink2);
+  line-height:1.8;margin-bottom:6px}
+.tldr-facts li:before{content:"";position:absolute;left:0;top:10px;width:5px;height:5px;
+  border-radius:50%;background:var(--ink3)}
+.tldr-facts b{color:var(--ink);font-weight:600}
+.tldr-limit{font-size:12.5px;color:var(--ink3);line-height:1.78;margin:16px 0 0;
+  padding:11px 13px;background:var(--soft);border-radius:9px}
+.tldr-limit b{color:var(--ink2)}
+@media (max-width:560px){
+  .tldr{padding:18px 16px}
+  .tldr-big{font-size:19px}
+  .tldr-answer{font-size:16.5px}
+}
 p{margin:0 0 10px}
 .eyebrow{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink3)}
 .sub{color:var(--ink2);font-size:13.5px;margin-bottom:22px}
@@ -616,6 +827,17 @@ tbody tr:last-child td{border-bottom:none}
 
 .note{font-size:12.5px;color:var(--ink3);line-height:1.7;margin:10px 0 0;
   padding-left:0}
+/* 「不做什么 / 下一步」：两列清单，不用表格 —— 表格的 nowrap 会让长句破版。
+   只有条目标题（.bt）独占一行；句中加粗的数字必须保持行内，否则会断版。 */
+.bounds{list-style:none;padding:0;margin:0}
+.bounds li{padding:10px 0;border-bottom:1px solid var(--line);font-size:13.5px;
+  color:var(--ink2);line-height:1.75}
+.bounds li:last-child{border-bottom:none;padding-bottom:0}
+.bounds li b.bt{display:block;color:var(--ink);font-weight:600;font-size:14px;margin-bottom:2px}
+.bounds li b{color:var(--ink);font-weight:600}
+.sub-h{font-size:13px;font-weight:600;color:var(--ink2);margin:16px 0 6px;
+  letter-spacing:.02em}
+.sub-h:first-of-type{margin-top:4px}
 .warnbox{background:var(--up-soft);border-radius:10px;padding:12px 14px;font-size:13px;
   color:var(--ink2);line-height:1.7;margin-top:12px}
 .warnbox b{color:var(--up)}
@@ -682,7 +904,11 @@ def _compare_line(snap: float | None, roll: float | None) -> str:
 
 def _rolling_block(roll: RollingReport, rep: DispositionReport) -> list[str]:
     """逐日滚动口径区块。数据不足时也说清楚缺什么，而不是整块消失。"""
-    out = ['<section class="block">', "<h2>逐日滚动口径：每个卖出日都算一次</h2>"]
+    out = [
+        '<section class="block">',
+        "<h2>换个更严的算法，结论还成立吗？"
+        "<small>逐日滚动口径 · 每个卖出日重算一次账面端，而不是只看期末</small></h2>",
+    ]
 
     if roll.mode != "rolling" or not roll.has_result:
         out.append(
@@ -857,12 +1083,16 @@ def _peer_block(b: BenchmarkReport) -> list[str]:
     if not b.comparable:
         return [
             '<section class="block">',
-            "<h2>同行基准：这次不做对照</h2>",
+            "<h2>这次跟学术研究比不了<small>同行基准 · 缺少可对照的数据，直接说清缺什么</small></h2>",
             f'<p class="note">{_esc(b.blocked_reason or "")}</p>',
             "</section>",
         ]
 
-    out = ['<section class="block">', "<h2>同行基准：你在哪个量级</h2>"]
+    out = [
+        '<section class="block">',
+        "<h2>跟学术研究比，你这算严重吗？"
+        "<small>同行基准 · Odean 1998 / 武佳薇 2020，只比量级，不给你排名</small></h2>",
+    ]
 
     out.append(
         '<p class="note">两条轴上的点来自已发表研究，是<b>群体点估计</b>；'
@@ -956,6 +1186,155 @@ _VERDICT_CN = {
 }
 
 
+#: 「这个报告不做什么」。每一条都对应一个**看起来更专业、实际站不住**的做法 ——
+#: 写出来是为了让读者知道这些坑作者踩过并且主动绕开了，不是免责声明。
+_NOT_DOING = [
+    ("不预测收益、不推荐标的",
+     "交割单里只有已经发生的事。任何「照这个能赚多少」的说法都是编的，"
+     "本项目不提供、也不暗示。"),
+    ("不用分位数给你排名",
+     "文献只报告群体均值，没有个体分布。硬套一个分布算出「你比 84% 的散户严重」"
+     "是伪精确 —— 这个功能原计划要做，查完原文发现做不了，已撤下并写进核查记录。"),
+    ("不把「已实现收益率」当业绩",
+     "它不含未平仓浮盈浮亏、不含资金的时间价值，和「账户总资产收益率」不是一回事。"
+     "真正的业绩归因需要每日持仓市值序列，当前版本不做。"),
+    ("不自动判断价格是否复权",
+     "账本成本是不复权的成交价。喂进来的如果是前复权价，历史价会被按除权因子下调，"
+     "「成本 120 元 vs 现价 92 元」凭空多出一笔浮亏，还会静默进 PGR/PLR 的分母。"
+     "口径靠输入保证：取数脚本默认不复权，别改。"),
+    ("不覆盖融资融券利息、基金申赎、期权",
+     "这些不在「成交」的语义里。硬塞进 FIFO 配对会污染成本，"
+     "宁可明确不支持，也不给一个算得出来但算错了的数。"),
+    ("数据不出你的电脑",
+     "全程本地运行，报告是单文件 HTML、零外链请求。代价是转发出去就等于"
+     "交出完整原始数据 —— 分享前请自行确认是否要脱敏。"),
+]
+
+
+def _bounds_block(
+    rep: DispositionReport,
+    sig: SignificanceResult | None,
+    *,
+    has_price_history: bool,
+    has_prices: bool,
+    has_benchmark: bool,
+    n_realized: int,
+    span_days: int,
+) -> list[str]:
+    """「这个报告不做什么」+「下一步可以做什么」。
+
+    为什么值得单独占用一块版面：
+        这份报告会被拿去判断作者的水平。而判断水平最快的方式不是看做了什么，
+        是看知不知道自己没做什么 —— 六条「不做」里任何一条说反了，
+        都比少给一个指标更致命。
+        「下一步」也一样：诊断完不给可执行的动作，读者只能带走一个情绪。
+    """
+    out = [
+        '<section class="block">',
+        "<h2>这个报告不做什么"
+        "<small>写在这里是为了让上面的结论更可信，不是免责声明</small></h2>",
+        '<ul class="bounds">',
+    ]
+    for title_, why in _NOT_DOING:
+        out.append(f'<li><b class="bt">{title_}</b>{why}</li>')
+    out.append("</ul>")
+    out.append("</section>")
+
+    # --- 下一步：分成「让报告更准」和「让习惯少亏钱」两类
+    todo: list[str] = []
+    missing = []
+    if not has_price_history:
+        missing.append(
+            "<code>--price-history</code> 给一份逐日收盘价 —— "
+            "这是本报告最严的部分（滚动口径 + 同行基准）唯一的数据来源"
+        )
+    if not has_prices:
+        missing.append(
+            "<code>--prices</code> 给未平仓的最新价 —— "
+            "PGR/PLR 的分母要「已实现 + 账面」两端，缺了它只能看已实现画像"
+        )
+    if not has_benchmark:
+        missing.append(
+            "<code>--benchmark</code> 给同期指数日线 —— "
+            "才能回答「有没有跑赢大盘」"
+        )
+    if missing:
+        # 标题要跟着实际缺几样走 —— 只缺一样却说「补三样」，读者会以为漏了
+        head = {1: "还差一样数据", 2: "还差两样数据"}.get(len(missing), "补三样数据")
+        todo.append(
+            f'<div class="sub-h">想让它更准：{head}</div>'
+            "<ul class=\"bounds\">"
+            + "".join(f"<li>{m}</li>" for m in missing)
+            + "</ul>"
+        )
+
+    # 样本量提示：时间长度和卖出笔数是两个独立门槛，任一不足都要说
+    thin: list[str] = []
+    if span_days and span_days < 180:
+        thin.append(f"跨度只有 <b>{span_days} 天</b>")
+    if n_realized < 20:
+        thin.append(f"已实现只有 <b>{n_realized} 笔</b>")
+    if thin:
+        todo.append(
+            '<div class="sub-h">想让它更准：样本还太薄</div>'
+            '<ul class="bounds"><li>' + "、".join(thin) + "。"
+            "处置效应是习惯性偏差，得攒够时间和足够多的卖出动作才看得出来 —— "
+            "几个月内的数据很容易把运气当成习惯。</li></ul>"
+        )
+
+    # 行为建议：只在方向站得住的时候给，且明确标注不是投资建议
+    advice = ""
+    if sig is not None and _sig_ok(sig) and sig.de_count is not None:
+        if sig.de_count > 0:
+            advice = (
+                "你的偏差方向很明确（卖盈持亏，且统计显著）。文献里对这种偏差"
+                "最常见的干预不是「下次注意」，而是<b>把卖出决策从临场判断改成事先写好的规则</b>"
+                " —— 比如买入时就定下止损线，盈利到某个幅度分批止盈。"
+                "规则的价值在于它不参与情绪。"
+            )
+        else:
+            advice = (
+                "你在做反人性的事：亏损实现比例高于盈利实现比例，而且统计显著。"
+                "这是多数人做不到的方向，但代价通常是<b>止损过于频繁</b> —— "
+                "建议顺手看一眼「每笔平均盈亏」和交易频率：止损次数多、单笔盈利小，"
+                "说明可能切得太碎。"
+            )
+    elif rep.has_full and rep.disposition_effect is not None and abs(rep.disposition_effect) > 0.10:
+        advice = (
+            "方向有迹象，但样本量还不足以排除偶然 —— "
+            "现在最该做的不是改交易习惯，是<b>继续积累记录</b>。"
+            "按当前笔数，再攒几个月才够下判断。"
+        )
+    if advice:
+        todo.append(
+            '<div class="sub-h">想让这个习惯少亏钱：一条建议</div>'
+            f'<ul class="bounds"><li>{advice}</li></ul>'
+        )
+    if not todo:
+        todo.append(
+            '<div class="sub-h">下一步</div>'
+            '<ul class="bounds"><li>数据已齐、观察期也够。'
+            "想更进一步只能拉长时间窗口，或者换一批账户做横向对照。</li></ul>"
+        )
+
+    out.extend([
+        '<section class="block">',
+        "<h2>下一步可以做什么"
+        "<small>两份清单：让这份报告更准 / 让这个习惯少亏钱</small></h2>",
+        *todo,
+    ])
+    # 只有真给了建议才需要那句免责声明 —— 没给建议还挂着，
+    # 读者会以为上面藏了半句投资建议。
+    if advice:
+        out.append(
+            '<p class="note">以上是行为金融文献里常见的干预思路，'
+            "用于描述「这类偏差一般怎么处理」，<b>不构成投资建议</b>。"
+            "要不要改、怎么改，取决于你自己的资金性质和风险承受能力。</p>"
+        )
+    out.append("</section>")
+    return out
+
+
 def _peer_ref_de(b: BenchmarkReport) -> float:
     for c in b.de_comparisons:
         if c.theirs:
@@ -1004,29 +1383,16 @@ def build_report(
         "</header>",
     ]
 
-    # --- 一句话结论 + 人格标签
-    tag_html = []
-    for i, t in enumerate(tags[:3]):
-        rev = ' rev' if "反处置" in t.name else ""
-        cls = f"tag primary{rev}" if i == 0 and t.strength >= 0.25 else "tag"
-        tag_html.append(f'<span class="{cls}" title="{_esc(t.desc)}">{_esc(t.name)}</span>')
-    if not tag_html:
-        tag_html.append('<span class="tag">尚无足够数据形成画像</span>')
-
-    verdict = [
-        '<section class="verdict">',
-        f'<p class="verdict-text">{_esc(head_line)}</p>',
-        '<div class="tags">' + "".join(tag_html) + "</div>",
-    ]
-    for t in tags[:3]:
-        # evidence 是纯文本（含 \n 换行）：整体转义后用 pre-line 渲染。
-        # 不能像其他依据那样内嵌 HTML —— 里面拼了用户数据（标的代码），
-        # 必须原样转义；也不要预转义，否则 <br> 会变成 &lt;br&gt; 显示出来。
-        verdict.append(
-            f'<details><summary>{_esc(t.name)} · {_esc(t.desc)}</summary>'
-            f'<div class="body pre">{_esc(t.evidence)}</div></details>'
-        )
-    verdict.append("</section>")
+    # --- 30 秒版：结论 + 证据 + 边界，一次说完。
+    # 它是整份报告唯一一处「读完就走也不亏」的内容，所以放在 KPI 之前。
+    tldr = _tldr(
+        rep, sig, head_line, tags,
+        n_realized=n_realized,
+        n_events=len(ds.events),
+        n_symbols=len(ds.symbols),
+        span_days=span_days,
+        unit=unit,
+    )
 
     # --- KPI 卡
     win_rate = summary["胜率"]
@@ -1085,7 +1451,7 @@ def build_report(
             f"<b>{_esc(sig.verdict)}</b>",
         ))
     kpis.append(_kpi(
-        "赢家 / 输家 均持", f"{rep.avg_hold_win} / {rep.avg_hold_loss}", "",
+        "赚的 / 亏的各拿多久", f"{rep.avg_hold_win} / {rep.avg_hold_loss}", "",
         f"{unit}",
         f"盈利笔平均持有 <b>{rep.avg_hold_win} {unit}</b>；"
         f"亏损笔平均持有 <b>{rep.avg_hold_loss} {unit}</b>。<br>"
@@ -1106,7 +1472,11 @@ def build_report(
     kpis.append("</section>")
 
     # --- 处置效应双口径说明
-    disp_block = ['<section class="block">', "<h2>处置效应：两种口径必须一起看</h2>"]
+    disp_block = [
+        '<section class="block">',
+        "<h2>两套算法，答案一致吗？"
+        "<small>处置效应 DE · 金额口径与计数口径：两边都看，不一致本身就是信息</small></h2>",
+    ]
     if rep.has_full and sig is not None and sig.de_count is not None:
         disp_block.append(
             f'<p>金额口径 DE <b class="{_signed_span(rep.disposition_effect or 0)}">'
@@ -1147,7 +1517,8 @@ def build_report(
         mdd = min(mdd, v - peak)
     curve_block = [
         '<section class="block">',
-        "<h2>累计已实现盈亏</h2>",
+        "<h2>卖掉的那些，一共赚了多少？"
+        "<small>累计已实现盈亏 · 按卖出日累计，不含还在手上的浮盈浮亏</small></h2>",
         '<p class="note">按卖出日累计。单日盈亏噪声太大，累计曲线才能回答'
         "「这一年到底在往上还是往下」。</p>",
         f'<div class="scroll">{svg_curve(curve)}</div>',
@@ -1172,7 +1543,8 @@ def build_report(
     bins = hold_bins(chunks, ds.calendar)
     bins_block = [
         '<section class="block">',
-        "<h2>你拿了多久才卖</h2>",
+        "<h2>赚钱的和亏钱的，你各拿了多久？"
+        "<small>持有期分布 · 赢家与输家分开计</small></h2>",
         '<div class="legend">'
         '<span><i style="background:var(--up)"></i>盈利笔</span>'
         '<span><i style="background:var(--down)"></i>亏损笔</span></div>',
@@ -1197,7 +1569,11 @@ def build_report(
     bins_block.append("</section>")
 
     # --- 基准对比
-    bench_block = ['<section class="block">', "<h2>与基准对比</h2>"]
+    bench_block = [
+        '<section class="block">',
+        "<h2>同期大盘涨跌对比"
+        "<small>已实现收益率 vs 基准收益率 · 只能当参考，不能当业绩</small></h2>",
+    ]
     invested = _invested(ds)
     my_ret = (float(total_pnl) / float(invested)) if invested > 0 else 0.0
     if benchmark and span:
@@ -1248,8 +1624,22 @@ def build_report(
         )
     bench_block.append("</section>")
 
+    # --- 边界与下一步。
+    # 放在明细之前而不是最后：明细又长又枯燥，读者在那里关掉页面的概率最高；
+    # 而这两块是最该被看见的自省，不能承担这个风险。
+    bounds = _bounds_block(
+        rep, sig,
+        has_price_history=price_history is not None,
+        has_prices=prices is not None,
+        has_benchmark=benchmark is not None,
+        n_realized=n_realized,
+        span_days=span_days,
+    )
+
     # --- 明细
-    detail = ['<section class="block">', "<h2>明细（可审计）</h2>",
+    detail = ['<section class="block">',
+              "<h2>每一笔的账，都能对得上"
+              "<small>明细 · 可逐行审计回原始交割记录</small></h2>",
               '<p class="note">上面每一个数字都能在这里找到对应原始记录。'
               "点开逐项核对。</p>"]
 
@@ -1333,10 +1723,10 @@ def build_report(
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
         f"<title>{_esc(title)} · tradeopsy</title>"
         f"<style>{_CSS}</style></head><body><main>"
-        + "".join(head) + "".join(verdict) + "".join(kpis)
+        + "".join(head) + "".join(tldr) + "".join(kpis)
         + "".join(disp_block) + "".join(roll_block) + "".join(peer_block)
         + "".join(curve_block) + "".join(bins_block)
-        + "".join(bench_block) + "".join(detail) + "".join(footer)
+        + "".join(bench_block) + "".join(bounds) + "".join(detail) + "".join(footer)
         + "</main></body></html>"
     )
     return doc

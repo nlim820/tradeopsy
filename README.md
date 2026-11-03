@@ -8,23 +8,108 @@
 > 姊妹项目 [ashare-quant](https://github.com/nlim820/ashare-quant) 回答"这个策略赚不赚钱"；
 > tradeopsy 回答"**你为什么拿不住**"。
 
-**核心不是报告，是口径。** 体检报告只是输出形态；真正的工作在报告底下：
+![status](https://img.shields.io/badge/status-alpha-orange)
+![python](https://img.shields.io/badge/python-3.10%2B-blue)
+![deps](https://img.shields.io/badge/core%20deps-zero-brightgreen)
+![tests](https://img.shields.io/badge/tests-221%20passing-brightgreen)
+
+---
+
+## 如果你只有 30 秒
+
+大多数人打开一份"交易分析"只想确认三件事。这张表直接回答，细节都在下面。
+
+| | |
+|---|---|
+| **它做什么** | 读你的券商交割单，算一件事：你是不是「赚一点就跑、亏了死扛」。这在行为金融里叫**处置效应**（Disposition Effect），是散户长期跑不赢宽基指数的主因之一 —— 因为它实际会**截断盈利、放大亏损**。 |
+| **它不做什么** | 不预测收益、不荐股、不评价未来、不给你排名。只把**已经发生**的交易量化。完整边界见[报告里那一块](#报告里有什么)，以及[明确不做的事](#明确不做的事)。 |
+| **凭什么可信** | 221 个测试全绿；FIFO 配对用**人工手算的黄金样本**验证（差 1 分钱就算 bug）；学术基准**全部回原文核实**，据此撤下了两条二手误传；口径可疑处宁可留空，也不给一个"算得出来但算错了"的数。 |
+
+报告第一屏长这样（示例报告 `examples/synthetic_accounts/reports/p01_chase_sell.html`，
+合成人格「追涨杀跌」，**已明确标注为合成数据**）：
+
+```
+┌─ 如果你只有 30 秒 ──────────────────────────────────────────┐
+│ 这份报告只回答一个问题：                                     │
+│ 你是不是「赚一点就跑、亏了死扛」？                           │
+│                                                             │
+│ 你的答案                                                     │
+│ 你卖掉的赚钱票平均只拿了 7.6 交易日，亏钱的却扛了 105.2      │
+│ 交易日 —— 这是统计显著的处置效应（p=0.002）。                │
+│                                                             │
+│ · 亏钱的比赚钱的多扛 13.8 倍                                 │
+│ · 盈利时兑现 97.6%，亏损时只兑现 37.1%，差 +60.5%（= DE）    │
+│ · 145 笔已实现撑住检验：p=0.002，95% 区间 [+8.9%, +53.4%]    │
+│ · 看不懂 PGR / PLR / DE？展开有 6 条人话解释                 │
+│                                                             │
+│ 它不做什么：不预测收益、不推荐标的、不评价未来。             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+> **只有 30 秒的人看到这里就够了。** 下面是给想深究的人准备的。
+
+---
+
+## 3 分钟：跑起来
+
+不需要真实数据 —— 仓库自带一份合成示例账户（覆盖 10 类真实脏数据：送转、分红、配股、可转债 T+0、拆单……）。
+
+```bash
+git clone https://github.com/nlim820/tradeopsy && cd tradeopsy
+
+# 生成单文件 HTML 体检报告（零依赖、不联网、离线可看）
+PYTHONPATH=src python -m tradeopsy report examples/sample_account \
+    --price-history examples/sample_account_price_history.csv -o report.html
+
+# 或者终端里看文本版
+PYTHONPATH=src python -m tradeopsy analyze examples/sample_account \
+    --price-history examples/sample_account_price_history.csv
+
+python -m unittest discover -s tests        # 221 个测试
+```
+
+想用真实交割单？把它放进 `private/`（**该目录永不进 git**，见[隐私边界](#隐私边界)），然后：
+
+```bash
+PYTHONPATH=src python -m tradeopsy report private --price-history private/price_history.csv
+```
+
+价格序列从哪来，见[这一节](#价格序列从哪来)。
+
+### 报告里有什么
+
+报告是**分层**的，不同读者可以在不同深度停下：
+
+| 层 | 内容 | 给谁看 |
+|---|---|---|
+| **第一屏** | 「如果你只有 30 秒」：问题 → 结论 → 三条依据 → 边界 | 只想知道结论的人 |
+| **KPI 卡** | 已实现收益 / 胜率 / DE / 持有期 / 交易频率，每张卡都能展开看算法 | 想快速扫一眼全貌 |
+| **专业分析** | 两套口径对照、逐日滚动口径、同行基准、累计曲线、持有期分布 | 想判断方法论是否站得住 |
+| **自省区块** | 「这个报告不做什么」+「下一步可以做什么」 | 关心结论边界的人 |
+| **明细** | 每一笔的建仓/平仓/成本/费用，逐行可回原始流水 | 想审计的人 |
+
+章节标题都做成了「人话主标题 + 专业名副标题」，例如：
+
+> **换个更严的算法，结论还成立吗？**
+> <sub>逐日滚动口径 · 每个卖出日重算一次账面端，而不是只看期末</sub>
+
+---
+
+## 深入：为什么这么设计
+
+### 核心不是报告，是口径
+
+体检报告只是输出形态；真正的工作在报告底下：
 FIFO 配对要算对 10 送 3、配股缴款、可转债 T+0，持有期要按 A 股交易日，
 PGR/PLR 要给 bootstrap 区间而不是一个孤零零的点，同行基准必须回原文核实
 （本项目已据此撤下两条二手误传的基准）。**报告里每个数字都能展开审计回原始流水。**
 
-![status](https://img.shields.io/badge/status-alpha-orange)
-![python](https://img.shields.io/badge/python-3.10%2B-blue)
-![deps](https://img.shields.io/badge/core%20deps-zero-brightgreen)
-
----
-
-## ⚠️ 当前状态：Alpha（交割单体检链路已闭环；纸面账户管道已搭好，账本待累积）
+### ⚠️ 当前状态：Alpha
 
 已经能跑的部分：
 
 - **FIFO 配对引擎**（Decimal 记账，黄金样本测试）
-- **CSV 解析层**（编码/表头/列名自动适配）
+- **CSV 解析层**（编码/表头/列名自动适配；递归扫描子目录；告警带文件名）
 - **命令行体检报告**（`tradeopsy analyze`，逐笔已实现 + 按标的归因）
 - **处置效应引擎 PGR/PLR**（严格 Odean 1998 口径 + A 股持有期本土化）
 - **逐卖出日滚动口径**（Odean 原文精细版：每个卖出日重估账面端，T+1 当日买入不进分母；
@@ -43,26 +128,7 @@ PGR/PLR 要给 bootstrap 区间而不是一个孤零零的点，同行基准必�
 - **纸面账户日更管道**（每个交易日自动撮合、记账、出净值，跑在 GitHub Actions 上；
   账本自 2026-10-30 起累积，目前只有初始行，尚未产出可看的净值曲线）
 
-**216 个测试全绿。**
-
-一条命令看效果（离线、不联网）：
-
-```bash
-# 生成单文件 HTML 体检报告（自带示例版：examples/sample_account_report.html）
-# 只给 --price-history 时，末价自动充当期末快照，两套口径一次出齐
-PYTHONPATH=src python -m tradeopsy report examples/sample_account \
-    --price-history examples/sample_account_price_history.csv -o report.html
-
-# 终端里看文本版
-PYTHONPATH=src python -m tradeopsy analyze examples/sample_account \
-    --price-history examples/sample_account_price_history.csv
-
-python examples/disposition_demo.py          # 处置效应体检卡 + 显著性（Wrapped 风格）
-PYTHONPATH=src python -m tradeopsy analyze fixtures   # 最小黄金样本
-```
-
-不想放真实交割单也能看到完整效果 —— 上面第一条用的是仓库自带的
-[示例账户](examples/sample_account/README.md)（合成数据，覆盖 10 类真实脏数据场景）。
+**221 个测试全绿。**
 
 **持有期口径**：默认按 A 股交易日计算（缺省为工作日近似，误差约 4%）；
 想完全精确就给它一份行情 K 线日期（`--calendar`）；`--natural-days` 可退回自然日做对照。
@@ -124,8 +190,8 @@ python tools/fetch_prices.py --from-ledger private/
 
 数字堆在那里，用户看完不知道该改什么。
 
-tradeopsy 的最终形态是一份**能发出去的年度体检报告**：一句话结论 + 一张图 + 一个同行分位。
-不是"胜率 47%"，而是"**你的处置效应比 84% 的 A 股散户更严重**"。
+tradeopsy 的最终形态是一份**能发出去的年度体检报告**：一句话结论 + 一张图 + 一个同行对照。
+不是"胜率 47%"，而是"**你的处置效应明显，而且这个结论撑得住统计检验**"。
 
 ---
 
@@ -144,7 +210,7 @@ tradeopsy 的最终形态是一份**能发出去的年度体检报告**：一句
 
 ---
 
-## 快速开始
+## 其他用法
 
 ```bash
 pip install -e .
@@ -154,9 +220,6 @@ tradeopsy analyze private
 
 # 跑引擎自检（不需要任何真实数据、不联网）
 python examples/demo.py
-
-# 跑全部测试
-python -m unittest discover -s tests -v
 
 # 纸面账户：回放一段历史，看看它跑起来长什么样
 python examples/paper_replay.py --since 2026-05-01
@@ -196,7 +259,7 @@ GitHub 的提交历史不可撤回 —— 事后删文件也没用。所以 `pri
 
 ## 它每天自己在跑
 
-这是本项目最不像“课程作业”的地方：**账户不是一个脚本，是一个每天运行的系统。**
+这是本项目最不像"课程作业"的地方：**账户不是一个脚本，是一个每天运行的系统。**
 
 `paper/` 目录下的账本由 GitHub Actions 在每个交易日 15:40（北京时间）自动推进：
 取数 → 按目标权重撮合 → 收盘估值 → 写净值 → 生成次日指令 → commit 回仓库。
@@ -236,10 +299,10 @@ GitHub 的提交历史不可撤回 —— 事后删文件也没用。所以 `pri
 | 规则 | 不这么做的后果 |
 |---|---|
 | T 日收盘出信号，**T+1 开盘成交** | 同一个价格既出信号又成交 = 未来函数，收益全假 |
-| 一字板（开=高=低）不成交 | 账户会在根本买不进的日子“成功买入”，净值虚高 |
+| 一字板（开=高=低）不成交 | 账户会在根本买不进的日子"成功买入"，净值虚高 |
 | 佣金最低 5 元 | 小额碎单真实费率是名义费率的 4 倍，年化被吃 1% |
 | 差额 < 3% 总资产不调仓 | 每天为对齐权重反复下百元单，手续费磨死 |
-| 持仓不在目标里必须清仓 | 不这么写，账户会静默退化成“买入持有”（真实踩过） |
+| 持仓不在目标里必须清仓 | 不这么写，账户会静默退化成"买入持有"（真实踩过） |
 
 ---
 
@@ -270,6 +333,7 @@ GitHub 的提交历史不可撤回 —— 事后删文件也没用。所以 `pri
 - **不预测股价、不给买卖建议、不荐股。**
 - **不上传任何数据。** 引擎全部本地运行，交割单不出你的电脑。
 - **不在仓库里存真实交割单。** `fixtures/` 里全部是自己编造的假数据。
+- **不给分位数排名。** 文献只报群体均值、没有个体分布，硬套一个分布算"你超过 84% 的人"是伪精确。原计划要做，查完原文发现站不住，已撤。
 
 > 本项目是记录与分析工具，不构成投资建议。历史表现不代表未来收益。
 

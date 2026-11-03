@@ -155,6 +155,23 @@ class TestOneLiner(unittest.TestCase):
         line_pos = one_liner(self._rep(de=0.24), _sig(0.24, 0.40), 5)
         self.assertIn("处置效应迹象", line_pos)
 
+    def test_missing_de_falls_back_to_hold_ratio(self):
+        """回归：缺未平仓市值时 DE 为 None，但持有期比是可观测的方向证据。
+
+        旧实现直接落到「没有明显偏向」，等于把 12 倍的持有期差当没看见，
+        同时画像标签还在说「死扛型」—— 同一屏自相矛盾。
+        """
+        line = one_liner(self._rep(de=None), None, 12)
+        self.assertNotIn("没有明显偏向", line)
+        self.assertIn("处置效应", line)
+        # 必须同时说清可信度上限：这是行为迹象，不是统计结论
+        self.assertIn("不能算统计结论", line)
+
+    def test_de_and_hold_ratio_disagree_is_stated(self):
+        """DE 不大但持有期差很多：两个维度不一致，必须如实说出来。"""
+        line = one_liner(self._rep(de=0.02), None, 20)
+        self.assertIn("两个维度不一致", line)
+
 
 class TestPersonaTags(unittest.TestCase):
     def test_dead_holding_detected(self):
@@ -193,9 +210,26 @@ class TestBuildReport(unittest.TestCase):
 
     def test_contains_key_sections(self):
         html = build_report(self._dataset(), title="测试报告")
-        for kw in ["测试报告", "处置效应", "累计已实现盈亏", "你拿了多久才卖",
-                   "与基准对比", "明细（可审计）", "PGR − PLR"]:
+        # 章节标题是「人话主标题 + 专业名副标题」，两半都必须存在 ——
+        # 只留人话会让懂行的人找不到学术名字，只留术语会劝退其他人。
+        for kw in ["测试报告", "如果你只有 30 秒", "处置效应",
+                   "两套算法，答案一致吗？", "卖掉的那些，一共赚了多少？",
+                   "赚钱的和亏钱的，你各拿了多久？", "同期大盘涨跌对比",
+                   "这个报告不做什么", "下一步可以做什么",
+                   "每一笔的账，都能对得上", "PGR − PLR"]:
             self.assertIn(kw, html)
+
+    def test_report_does_not_contradict_itself(self):
+        """回归：同一份报告里不能既标「死扛型」又说「没有明显偏向」。
+
+        这两句话来自两套判定（画像标签看持有期比、一句话结论看 DE），
+        曾经各判各的 —— 缺未平仓市值时 DE 为 None，结论说「没有明显偏向」，
+        而标签基于 1.9 倍持有期比说「死扛型」。摆在同一屏，读者第一眼
+        就会怀疑整份报告。修法是在结论里让持有期比兜底。
+        """
+        html = build_report(self._dataset())
+        self.assertIn("死扛型", html)
+        self.assertNotIn("没有明显偏向", html)
 
     def test_escapes_user_data(self):
         events = _events()
@@ -213,6 +247,30 @@ class TestBuildReport(unittest.TestCase):
     def test_missing_benchmark_explains(self):
         html = build_report(self._dataset())
         self.assertIn("未提供基准数据，这一块留空", html)
+
+    def test_next_steps_count_matches_missing(self):
+        """缺几样就说几样 —— 只缺两样时不能说「补三样数据」。
+
+        「下一步」清单是按缺失项动态拼的，标题写死成「补三样」会让
+        只缺一项的人以为自己漏看了两条。
+        """
+        html = build_report(self._dataset())  # price-history / prices / benchmark 全缺
+        self.assertIn("补三样数据", html)
+        html2 = build_report(
+            self._dataset(), prices={"A": D("11"), "B": D("19")}
+        )  # 只缺 price-history 和 benchmark
+        self.assertIn("还差两样数据", html2)
+        self.assertNotIn("补三样数据", html2)
+
+    def test_very_small_sample_admits_it(self):
+        """1~4 笔已实现时不能说「没有明显偏向」—— 那点观测分不出偏向。"""
+        events = [
+            Event(date(2026, 1, 5), "A", EventType.BUY, D("100"), D("10")),
+            Event(date(2026, 2, 5), "A", EventType.SELL, D("100"), D("10")),
+        ]
+        chunks = [_chunk("A", date(2026, 1, 5), date(2026, 2, 5), "1000", "0")]
+        html = build_report(_mk_dataset(events, chunks))
+        self.assertIn("样本太少", html)
         self.assertIn("--benchmark", html)
 
     def test_benchmark_renders_comparison(self):
