@@ -1300,7 +1300,7 @@ def build_report(
         + "".join(
             f"{_esc(name)}：编码 {_esc(m.get('encoding'))} · 分隔符 {_esc(m.get('delimiter'))} · "
             f"表头第 {_esc(m.get('header_row'))} 行 · {_esc(m.get('total_rows'))} 行"
-            + (f" · 列映射 {' / '.join(f'{k}={v}' for k, v in (m.get('columns') or {}).items() if v)}"
+            + (f" · 列映射 {' / '.join(f'{_esc(k)}={_esc(v)}' for k, v in (m.get('columns') or {}).items() if v)}"
                if m.get("columns") else "")
             + "<br>"
             for name, m in ds.file_metas

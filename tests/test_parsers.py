@@ -16,7 +16,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from tradeopsy.__main__ import _dedupe
-from tradeopsy.load import dedupe as dedupe_tagged
+from tradeopsy.load import collect_inputs, dedupe as dedupe_tagged, load_dataset
 from tradeopsy.model import Event, EventType
 from tradeopsy.parsers import detect, parse_file, to_date, to_decimal
 
@@ -223,6 +223,108 @@ class TestDetection(unittest.TestCase):
         r = parse_file(p)
         self.assertEqual(len(r.events), 0)
         self.assertTrue(r.warnings)
+
+
+class TestMissingPrice(unittest.TestCase):
+    """回归：价格与金额同时缺失时，不得静默按 0 成本入账。
+
+    旧实现在 price=0 且 amount=0 时照常造事件，账本按 0 成本配对，
+    整趟盈亏被静默算成 0 —— 报告看着"正常"，其实是假数。
+    """
+
+    def test_missing_price_and_amount_is_skipped_with_warning(self):
+        content = (
+            "成交日期,证券代码,证券名称,业务名称,成交数量,成交价格,成交金额\n"
+            "2026-01-05,600519,贵州茅台,证券买入,100,,\n"
+        )
+        p = _write_tmp(content, "utf-8")
+        r = parse_file(p)
+        self.assertEqual(len(r.events), 0)
+        self.assertTrue(any("缺少成交价格" in str(w) for w in r.warnings))
+
+    def test_price_reverse_calculated_from_amount(self):
+        """价格缺失但金额在 —— 应反推价格，而不是丢弃。"""
+        content = (
+            "成交日期,证券代码,证券名称,业务名称,成交数量,成交价格,成交金额\n"
+            "2026-01-05,600519,贵州茅台,证券买入,100,,168000\n"
+        )
+        p = _write_tmp(content, "utf-8")
+        r = parse_file(p)
+        self.assertEqual(len(r.events), 1)
+        self.assertEqual(r.events[0].price, Decimal("1680.0000"))
+
+
+class TestDirectoryCollection(unittest.TestCase):
+    """目录收集：递归扫描（支持按年份分子目录），但不误伤辅助文件。"""
+
+    @staticmethod
+    def _dir() -> Path:
+        return Path(tempfile.mkdtemp())
+
+    def test_nested_subdirectory_is_collected(self):
+        """private/2026/x.csv 这种按年份分子目录，不能静默漏读。"""
+        d = self._dir()
+        (d / "2026").mkdir()
+        (d / "2026" / "x.csv").write_text(
+            "成交日期,证券代码,证券名称,业务名称,成交数量,成交价格\n"
+            "2026-01-05,600519,贵州茅台,证券买入,100,1680\n",
+            encoding="utf-8",
+        )
+        ds = load_dataset(d)
+        self.assertEqual(len(ds.events), 1)
+
+    def test_price_history_is_not_treated_as_ledger(self):
+        """fetch_prices 写进 private/ 的 price_history.csv 不能被当交割单。"""
+        d = self._dir()
+        (d / "ledger.csv").write_text(
+            "成交日期,证券代码,证券名称,业务名称,成交数量,成交价格\n"
+            "2026-01-05,600519,贵州茅台,证券买入,100,1680\n"
+            "2026-02-05,600519,贵州茅台,证券卖出,100,1700\n",
+            encoding="utf-8",
+        )
+        (d / "price_history.csv").write_text(
+            "日期,代码,收盘价\n2026-01-05,600519,1680\n", encoding="utf-8"
+        )
+        ds = load_dataset(d)
+        self.assertNotIn("price_history.csv", [p.name for p in ds.paths])
+        self.assertEqual(len(ds.events), 2)
+        self.assertFalse(any("找不到表头行" in w for w in ds.warnings))
+
+    def test_hidden_cache_dir_is_skipped(self):
+        """fetch_prices 的 .cache 里全是 CSV，递归时不能当成交割单。"""
+        d = self._dir()
+        (d / "ledger.csv").write_text(
+            "成交日期,证券代码,证券名称,业务名称,成交数量,成交价格\n"
+            "2026-01-05,600519,贵州茅台,证券买入,100,1680\n",
+            encoding="utf-8",
+        )
+        cache = d / ".cache"
+        cache.mkdir()
+        (cache / "600519_20260101_20260201.csv").write_text(
+            "日期,收盘价\n2026-01-05,1680\n", encoding="utf-8"
+        )
+        ds = load_dataset(d)
+        self.assertEqual(len(ds.paths), 1)
+        self.assertEqual(len(ds.events), 1)
+
+
+class TestWarningSourceTag(unittest.TestCase):
+    """回归：告警必须带来源文件名，否则多份按月导出无从排查。"""
+
+    def test_warning_has_filename_prefix(self):
+        d = Path(tempfile.mkdtemp())
+        (d / "ok.csv").write_text(
+            "成交日期,证券代码,证券名称,业务名称,成交数量,成交价格\n"
+            "2026-01-05,600519,贵州茅台,证券买入,100,1680\n",
+            encoding="utf-8",
+        )
+        (d / "bad.csv").write_text(
+            "成交日期,证券代码,证券名称,业务名称,成交数量,成交价格\n"
+            "2026-01-05,,贵州茅台,证券买入,100,1680\n",
+            encoding="utf-8",
+        )
+        ds = load_dataset(d)
+        self.assertTrue(any(w.startswith("[bad.csv]") for w in ds.warnings))
 
 
 if __name__ == "__main__":

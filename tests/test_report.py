@@ -244,5 +244,32 @@ class TestBuildReport(unittest.TestCase):
         self.assertIn(f"{summary['胜率']:.1%}", html)  # 胜率来自同一 summary
 
 
+class TestHtmlEscaping(unittest.TestCase):
+    """回归：CSV 表头等外部文本进 HTML 前必须转义，否则破版 / 注入。"""
+
+    def test_column_mapping_header_is_escaped(self):
+        events = [Event(date(2026, 1, 5), "600519", EventType.BUY, D("100"), D("1680"))]
+        lg = PositionLedger()
+        lg.apply_all(events)
+        ds = Dataset(
+            paths=[Path("a.csv")],
+            events=events,
+            ledger=lg,
+            file_metas=[(
+                "a.csv",
+                {
+                    "encoding": "utf-8",
+                    "header_row": 1,
+                    "total_rows": 2,
+                    # 表头直接来自用户 CSV，可能含 < & 等字符
+                    "columns": {"date": "成交日期", "biz": "业务名称<x>"},
+                },
+            )],
+        )
+        html = build_report(ds)
+        self.assertIn("业务名称&lt;x&gt;", html)
+        self.assertNotIn("业务名称<x>", html)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -119,13 +119,46 @@ def dedupe(
     return out, dup
 
 
+#: 工具自身产出、不是交割单的辅助文件名（扫描目录时跳过）。
+#: 关键场景：fetch_prices 默认把 price_history.csv 写进 private/，
+#: 下一次 `analyze private/` 若把它当交割单解析，轻则多一条无意义告警，
+#: 重则（列名恰好对得上时）产出垃圾事件污染账本。
+AUX_STEMS = {"prices", "benchmark", "calendar", "nav"}
+
+
+def _is_auxiliary(name: str) -> bool:
+    """是否是工具自身的辅助文件（价格序列 / 基准 / 日历 / 纸面净值）。"""
+    stem = Path(name).stem.lower()
+    if stem in AUX_STEMS:
+        return True
+    # 覆盖 price_history、p01_xxx_price_history、benchmark_2025 等命名
+    return (
+        "price_history" in stem
+        or stem.startswith(("prices_", "benchmark_", "calendar_", "nav_"))
+    )
+
+
 def collect_inputs(target: Path) -> list[Path]:
-    """把一个目录或单个文件展开成待解析文件列表。"""
+    """把一个目录或单个文件展开成待解析文件列表。
+
+    目录会**递归**扫描 —— 真实用户常按年份/月份分子目录
+    （private/2025/、private/2026/），只扫一级会静默漏掉后面的年份。
+    但递归必须配两道过滤，否则会误伤：
+      - 跳过隐藏文件与隐藏目录（如 fetch_prices 的 .cache，里面全是 CSV 缓存）；
+      - 跳过工具自身产出的辅助文件（price_history / benchmark / calendar / nav）；
+      - 显式传入单个文件时不做任何过滤（用户点名要看就照做）。
+    """
     if target.is_dir():
-        return sorted(
-            p for p in target.iterdir()
-            if p.is_file() and p.suffix.lower() in DATA_SUFFIXES and not p.name.startswith(".")
-        )
+        out: list[Path] = []
+        for p in sorted(target.rglob("*")):
+            if not p.is_file() or p.suffix.lower() not in DATA_SUFFIXES:
+                continue
+            if any(part.startswith(".") for part in p.relative_to(target).parts):
+                continue
+            if _is_auxiliary(p.name):
+                continue
+            out.append(p)
+        return out
     return [target] if target.exists() else []
 
 
@@ -326,7 +359,9 @@ def load_dataset(
     for i, p in enumerate(paths):
         r = parse_file(p)
         tagged.extend((ev, i) for ev in r.events)
-        warnings.extend(r.warnings)
+        # 告警带上来源文件名：多份按月导出时，"第 5 行解析失败"若不说哪份文件，
+        # 用户根本无从排查。字符串化后 Dataset.warnings 也统一为 list[str]。
+        warnings.extend(f"[{p.name}] {w}" for w in r.warnings)
         metas.append((p.name, dict(r.meta)))
 
     merged = ParseResult(events=[ev for ev, _ in tagged], warnings=warnings)

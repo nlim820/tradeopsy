@@ -327,6 +327,16 @@ class GenericCsvParser(Parser):
         if etype in (EventType.BUY, EventType.SELL):
             if qty_abs == 0:
                 return None, ParseWarning(row_no, "买卖记录数量为 0", ",".join(row))
+            if price == 0:
+                # 价格与金额同时缺失：此时按 0 入账会把整趟盈亏静默算成 0，
+                # 属于最危险的一类错误（报告看起来\"正常\"，其实是假数）。
+                # 按项目原则\"宁可告警，不可静默\"，这里直接跳过并说明原因。
+                return None, ParseWarning(
+                    row_no,
+                    "买卖记录缺少成交价格且金额也无法反推，已跳过"
+                    "（按 0 记账会把盈亏静默算成 0，不可接受）",
+                    ",".join(row),
+                )
             # 买卖类事件的 fee 语义是"该笔交易的费用"（买计入成本，卖从收入扣）
             return (
                 Event(dt=dt, symbol=symbol, etype=etype,
