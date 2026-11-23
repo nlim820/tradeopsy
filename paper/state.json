@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "as_of": "2026-11-19",
+  "as_of": "2026-11-20",
   "cash": "100000.00",
   "initial_cash": "100000.00",
   "positions": {},
-  "pending_from": "2026-11-19",
+  "pending_from": "2026-11-20",
   "pending_targets": {}
 }
